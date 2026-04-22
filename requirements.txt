@@ -1,0 +1,30 @@
+# === v1.0.0 pins (unchanged) ===
+# LangGraph orchestration (criterion: Architectural Fidelity — Graph_Topology match)
+langgraph==0.2.60
+langgraph-checkpoint-sqlite==2.0.1   # ships AsyncSqliteSaver via langgraph.checkpoint.sqlite.aio
+
+# LangChain primitives (criterion: Protocol Compliance — base Message/RunnableConfig types)
+langchain-core==0.3.21
+
+# OpenRouter via OpenAI-compatible endpoint (criterion: VFS Isolation — no extra integrations)
+langchain-openai==0.2.10             # ChatOpenAI.ainvoke() supported since 0.2.x; supports base_url="https://openrouter.ai/api/v1"
+
+# Structured state validation (criterion: Anti-Hallucination — typed TypedDict/Pydantic assertions)
+pydantic==2.9.2
+
+# Environment loading (criterion: Testability — OPENROUTER_API_KEY, LANGCHAIN_* vars isolation)
+python-dotenv==1.0.1
+
+# LDD + Anti-Loop counter (criterion: Testability & Observability)
+pytest==8.3.3
+
+# LangSmith optional tracing (Q6 decision: opt-in via env vars; package pinned for reproducibility)
+langsmith==0.1.147
+
+# === v2.0.0 additions ===
+aiosqlite==0.20.0                    # AsyncSqliteSaver backing driver; pin for reproducibility (Criterion C1)
+tavily-python==0.5.0                 # AsyncTavilyClient — native async search; requires TAVILY_API_KEY (Criterion C3)
+pytest-asyncio==0.24.0               # @pytest.mark.asyncio + event_loop fixture (Criterion C5 + Stage-III tests)
+
+# === v3.0.0 additions ===
+gradio==5.9.1                        # Agentic UX streaming UI layer (src/ui/); ChatMessage-format Chatbot; WHY: task spec P1 + DevelopmentPlan_UI.md §1

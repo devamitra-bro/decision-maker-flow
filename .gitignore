@@ -1,0 +1,72 @@
+# === Secrets & local env ===
+.env
+.env.local
+*.env
+!.env.example
+
+# === Python bytecode / caches ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# === Virtualenvs ===
+.venv/
+venv/
+env/
+ENV/
+
+# === Packaging / build ===
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# === Test / coverage ===
+.pytest_cache/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.hypothesis/
+
+# Anti-Loop test counter (session-local, regenerated each run)
+**/.test_counter.json
+
+# === Runtime artefacts (produced by the Decision Maker pipeline) ===
+# LangGraph AsyncSqliteSaver checkpoint DB — contains user dilemmas + intermediate state
+checkpoints.sqlite
+checkpoints.sqlite-journal
+checkpoints.sqlite-wal
+checkpoints.sqlite-shm
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# LDD structured logs — grow unbounded, contain user prompts + PII-like content
+*.log
+logs/
+
+# === Gradio runtime ===
+gradio_cached_examples/
+flagged/
+.gradio/
+
+# === Jupyter / notebooks scratch ===
+.ipynb_checkpoints/
+
+# === IDE / editor ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db

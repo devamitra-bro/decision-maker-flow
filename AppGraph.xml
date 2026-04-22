@@ -1,0 +1,687 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FILE: AppGraph.xml
+  VERSION: 3.0.0
+  SCOPE: /Users/a1111/Dev/CrabLink/flows/brainstorm (local knowledge graph; does NOT extend any root-level graph in the framework host)
+  GENERATED_BY: mode-architect (Claude Code port, KiloCode v3.1) — post-QA finalization + post-debug parser immunization + centralised LLM-response sanitization (Option D) + Hybrid Reasoning Routing (T3) + UI layer (v3.0.0 — Gradio Agentic UX)
+  GENERATED_AT: 2026-04-21
+  SOURCES: plans/DevelopmentPlan.md v2.0.0 + produced source files (graph.py v2.0.0, nodes.py v2.2.0, tools.py v2.0.0, json_utils.py v1.2.0, llm_utils.py v1.0.0, llm_client.py v1.2.0) + mode-qa audit report (20/20 tests) + mode-debug cycle (real-network smoke run against x-ai/grok-4.1-fast — parser fix verified: 12/12 json_utils tests) + mode-code Option D delivery (40/40 tests, 14 new) + real-network verification on x-ai/grok-4.1-fast: last_question populated (294 chars, was ''); final_answer clean of all 7 reasoning/wrapper tags (verified 0 occurrences); Anti-Loop cap triggered end-to-end (rewrite_count 0→1→2 → force finalize) + T3 Hybrid Reasoning Routing A/B-measured on real grok-4.1-fast traffic (smoke_fb6488ad): start_session 44.04s→24.04s (-45%), total 209.06s→197.94s (-5%), LLM calls unchanged at 9, cost flat ~$0.068, final_answer quality preserved (3204 chars with CoVe arithmetic audit active)
+  CHANGES_VS_V1:
+    - Orchestration core migrated to async/await (all 6 LLM nodes + tool_node + public session API).
+    - SqliteSaver replaced by AsyncSqliteSaver (per-call async context manager pattern, Concept A).
+    - stub_search replaced by pluggable search_async (Tavily-backed when TAVILY_API_KEY set, stub_search_async otherwise).
+    - tool_node now dispatches N search queries concurrently via asyncio.gather.
+    - build_graph(checkpointer) — sync factory accepting DI checkpointer (tests pass MemorySaver; prod passes AsyncSqliteSaver).
+    - Routers (route_from_context, route_from_critique) remain SYNC — pure state inspectors.
+    - LDD per-query telemetry: IMP:7/IMP:8 pair emitted once per query inside tool_node and search_async.
+    - Safety invariants (DoubleTrueError, Anti-Loop cap at rewrite_count>=2) preserved VERBATIM.
+    - State schema (DecisionMakerState 13 fields), prompts.py constants, and graph topology (7 nodes + edges + interrupt_after=["3_Weight_Questioner"]) are FROZEN.
+  CHANGES_V2_0_1 (post-debug immunization):
+    - json_utils.py bumped to v1.1.0 — hardened against reasoning-model outputs (<thinking>, <think>, <reasoning>, <reflection> prefixes emitted by grok-4.1-fast, deepseek-r1, o1-family).
+    - NEW private function _strip_reasoning_blocks(raw) — Strategy 0 normalization pass (re.DOTALL | re.IGNORECASE) applied BEFORE all existing extraction strategies.
+    - Strategy 4 enhanced with Pass B fallback: json.JSONDecoder().raw_decode(normalized, first_brace_idx) finds the first balanced JSON object when greedy regex fails on noisy prefixes.
+    - JsonParseError.raw_snippet now preserves the ORIGINAL (pre-normalization) input — diagnostics retain full context.
+    - BUG_FIX_CONTEXT comment added inline citing the grok-4.1-fast failure incident at weight_parser.
+    - test_json_utils.py extended from 6 to 12 tests: 5 parametrized positive reasoning-prefix cases + 1 raw_snippet preservation test.
+    - scripts/smoke_run.py added (NEW, v1.0.0) — real-network end-to-end smoke runner against OpenRouter + Tavily using tempfile-isolated checkpoint DB.
+    - NO changes to v2.0.0 async topology, state schema, prompts, graph edges, routers, or safety invariants.
+  CHANGES_V2_1_0 (Option D — centralised LLM response sanitization):
+    - NEW module src/core/llm_utils.py v1.0.0 — canonical LLM-response sanitization (stdlib `re` only): strip_reasoning_blocks, extract_output_payload (prefers LAST wrapper block), sanitize_llm_response (idempotent pipeline).
+    - nodes.py bumped v2.0.0 → v2.1.0 — _invoke_llm_async now applies sanitize_llm_response to response.content BEFORE returning; NEW paired LDD log [IMP:8][BLOCK_SANITIZE] emitted with raw_length + cleaned_length + sanitized_delta; no node bodies modified.
+    - json_utils.py bumped v1.1.0 → v1.2.0 — local _strip_reasoning_blocks collapsed to a thin wrapper delegating to llm_utils.strip_reasoning_blocks (DRY); Strategy 0 retained as defence-in-depth for any caller bypassing _invoke_llm_async.
+    - Fixes TWO production leaks observed in real-network smoke run against grok-4.1-fast:
+        (1) weight_questioner wrote last_question='' because safe_json_parse returned a dict but the <output>-wrapped payload didn't map to the expected key — now last_question is populated (observed: 294 chars);
+        (2) final_synthesizer leaked raw <thinking>...</thinking><output>...</output> verbatim into final_answer — now final_answer is a clean Markdown document (verified: 0 occurrences of all 7 reasoning/wrapper tag variants).
+    - NEW test file src/features/decision_maker/tests/test_llm_utils.py v1.0.0 — 14 tests: 5 strip_reasoning_blocks unit + 5 extract_output_payload unit + 3 sanitize_llm_response unit + 3 pytest-asyncio integration regressions (test_weight_questioner_extracts_last_question_from_grok_style_response, test_final_synthesizer_strips_reasoning_from_final_answer, test_invoke_llm_async_emits_cleaned_length_log).
+    - Total pytest suite now 40/40 passing (26 from v2.0.0 + 14 new).
+    - Anti-Loop cap verified END-TO-END on real LLM traffic (first prod session where CoVe triggered): rewrite_count 0→1→2 → [IMP:10][BLOCK_ANTI_LOOP][SafetyTripped] → route='finalize'.
+    - NO changes to state schema, prompts, graph topology, routers, DoubleTrueError logic, Anti-Loop algorithm, or node function bodies.
+  CHANGES_V2_2_0 (T3 — Hybrid Reasoning Routing):
+    - MOTIVATION: grok-4.1-fast burns 60-80% of raw output tokens on <thinking> chain-of-thought blocks. Uniform reasoning=ON wastes latency/tokens on mechanical nodes that do no multi-step reasoning (routing, JSON extraction, single-question NL). Uniform reasoning=OFF loses CoVe arithmetic audit quality on analytical nodes (measured: final_answer -41% chars, +56% LLM calls, +15% cost — Pareto-dominated).
+    - llm_client.py bumped v1.1.0 → v1.2.0 — NEW explicit `reasoning_enabled: Optional[bool] = None` parameter. When None (default), falls back to OPENROUTER_REASONING_ENABLED env toggle (backward compat). When bool, overrides env. Factory stays domain-agnostic — per-node policy belongs to callers.
+    - nodes.py bumped v2.1.0 → v2.2.0 — NEW module-level constant `_NODE_REASONING_POLICY: dict[str, bool]` maps each of 6 LLM nodes to reasoning ON/OFF. Mechanical nodes (context_analyzer, weight_questioner, weight_parser) → False. Analytical nodes (draft_generator, cove_critique, final_synthesizer) → True. Each of 6 `build_llm()` call-sites changed to `build_llm(reasoning_enabled=_NODE_REASONING_POLICY["<node_name>"])`. No prompt / state / topology / router / safety invariant changes.
+    - llm_client.py v1.1.0 intermediate step introduced OPENROUTER_REASONING_ENABLED env toggle — retained in v1.2.0 as the None-fallback path (valuable for A/B experiments and emergency global overrides).
+    - Real-network A/B verification on grok-4.1-fast (thread smoke_fb6488ad, 2026-04-21):
+        * start_session wall-clock 44.04s → 24.04s (-45%) — mechanical nodes 1+3 no longer emit <thinking> blocks.
+        * Total (start+resume) 209.06s → 197.94s (-5%) — resume dominated by analytical nodes that keep reasoning ON.
+        * LLM call count 9 (parity with ON baseline; OFF-global degraded to 14 = +56% due to lost CoVe precision).
+        * Cost ≈$0.068 (flat vs ON baseline).
+        * final_answer 3204 chars (vs ON 4982 / OFF 2933) — CoVe arithmetic audit active and catching FV-annuity edge cases.
+    - NO changes to state schema, prompts.py, graph topology, routers, DoubleTrueError, Anti-Loop algorithm, LDD format, or sanitization pipeline.
+  CHANGES_V3_0_0 (Gradio Agentic UX layer):
+    - MOTIVATION: surface the multi-agent LangGraph execution in real time to the end user — step-by-step node progress, live State X-Ray, CoVe critique highlighting, Human-in-the-Loop gate after Node 3. Previously the feature was only accessible via raw async session API (start_session/resume_session) and scripts/smoke_run.py.
+    - graph.py bumped v2.2.0 → v3.0.0 — ADDITIVE ONLY. Two new async-generator public functions appended: stream_session (leg 1: seeds state → astream(stream_mode="updates") → yields raw chunks + final awaiting_user terminator) and stream_resume_session (leg 2: aupdate_state(user_answer) → astream → yields chunks + final done terminator). Existing build_graph / start_session / resume_session bodies, prompts, state schema, topology, interrupt_after, routers, Anti-Loop, DoubleTrueError all FROZEN.
+    - __init__.py bumped v1.0.0 → v1.1.0 — __all__ extended with stream_session + stream_resume_session. No other changes.
+    - NEW src/ui/ package (Controller+Presenter slim-MVC split):
+        * src/ui/app.py v1.0.0 — SOLE gradio importer (AC_UI_04). build_ui() -> gr.Blocks two-column layout (Chatbot type="messages" + controls | gr.JSON State X-Ray). on_submit async-generator handler dispatches between orchestrate_start and orchestrate_resume based on gr.State "mode" variable. on_new_session generates fresh uuid4 thread_id. inbrowser=True, 127.0.0.1 only (operator-local).
+        * src/ui/controllers.py v1.0.0 — FRAMEWORK-AGNOSTIC (NO gradio import). UIEvent TypedDict(total=False) with 9 kinds: session_started, node_started, node_completed, state_snapshot, cove_rewrite, awaiting_user, resume_started, final_answer, error. orchestrate_start + orchestrate_resume async generators consume stream_session / stream_resume_session and emit normalised UIEvent stream. _extract_cove_rewrite_event detects 5_CoVe_Critique decision="rewrite" + critique_feedback and emits a dedicated cove_rewrite event BEFORE the corresponding node_completed (ordering contract, AC_UI_08).
+        * src/ui/presenter.py v1.0.0 — PURE functions. render(event, chat_history, state_snapshot) -> (chat_history_new, state_snapshot_new, status_markdown). _filter_state_for_display drops internal/verbose fields and caps long strings at 500 chars. _format_status maps (event_kind, node_name) → Russian emoji-prefixed status per task spec §2.1 ("⏳ Узел 1: Анализ контекста...", "🌐 Выполнение N параллельных запросов...", "🚨 Критик нашел ошибку...", "✅ Готово").
+        * src/ui/__init__.py v1.0.0 — re-exports build_ui factory for scripts/run_brainstorm_ui.py.
+    - NEW scripts/run_brainstorm_ui.py v1.0.0 — operator launcher. Mirrors scripts/smoke_run.py topology: prepends project root to sys.path, loads .env, env-var sanity check (OPENROUTER_API_KEY, OPENROUTER_MODEL, TAVILY_API_KEY), lazy-imports gradio + build_ui, launches on 127.0.0.1 inbrowser=True, try/except KeyboardInterrupt.
+    - NEW tests/ui/ suite — 19 pytest tests, 100% pass (AC_UI_07/08/09/10/11/13/17 covered):
+        * tests/ui/test_presenter.py — 9 table-driven purity tests for render (one per UIEvent kind).
+        * tests/ui/test_state_streaming.py — 4 tests; core: test_three_updates_produce_three_uievents (mocked graph yielding 3 state updates → 3 node_completed + 3 state_snapshot + 1 terminator), test_cove_rewrite_emits_dedicated_event (ordering: cove_rewrite before node_completed).
+        * tests/ui/test_ui_handlers.py — 6 tests; covers on_submit transition to awaiting_user_answer, thread_id continuity, 6-slot tuple shape, no gradio import in controllers/presenter (AC_UI_11 enforcement), no .launch() in any test.
+        * tests/ui/conftest.py — Anti-Loop Protocol session hooks (.test_counter.json), pytest-asyncio mode=auto, ldd_capture fixture.
+    - NEW dependency: gradio==5.9.1 appended to requirements.txt v3.0.0 section (exactly ONE new pin, WHY-comment: "Chatbot type='messages'/ChatMessage API; actual 5.x contract — Criterion: C3 Stream fidelity + future-proof UI").
+    - LOG CENTRALISATION: ALL UI-level events land in the existing decision_maker.log via src/core/logger.py::setup_ldd_logger (AC_UI_16). Classifier tags: [UIEvent] for controller/presenter/app; [BeliefState][IMP:9] markers at session_started / awaiting_user / final_answer paths.
+    - CORE IMMUTABILITY VERIFIED (AC_UI_02): zero diff for prompts.py, state.py, nodes.py, tools.py; additive-only diff for graph.py and decision_maker/__init__.py.
+    - TEST BASELINE: tests/ui/ 19/19 passed + src/features/decision_maker/tests/ 40/40 passed (identical to pre-UI baseline — no regressions, AC_UI_14).
+-->
+<KnowledgeGraph>
+
+  <Brainstorm_DecisionMaker_2_2_0_Info TYPE="PROJECT_INFO">
+    <keywords>DecisionSupport; WeightedChoice; LangGraph; OpenRouter; CoVe; AntiHallucination; AntiLoop; VFS; VerticalFeatureSliced; LDD; LogDrivenDevelopment; SemanticExoskeleton; AsyncIO; AsyncSqliteSaver; Tavily; AsyncTavilyClient; asyncioGather; HumanInTheLoop; PluggableAdapter; DependencyInjection; PytestAsyncio; ReasoningModelNormalization; ThinkingTagStripping; OutputWrapperExtraction; CentralisedSanitization; IdempotentPipeline; GrokCompat; DeepSeekR1Compat; O1Compat; JsonRawDecode; SmokeRun; BlockSanitize; HybridReasoningRouting; PerNodeReasoningPolicy; MechanicalVsAnalyticalNodes; LatencyOptimization; ReasoningEnabledFlag</keywords>
+    <terms>
+      Dilemma; Weights; ToolFacts; CritiqueFeedback; RewriteCount; CheckpointerThreadId; InterruptAfter; JsonFenceParsing; DoubleTrueError; BeliefState; BlockAntiLoop; BlockDoubleTrueGuard; BlockExecuteSearches; BlockSanitize; PerCallCheckpointerContext; FakeLlmFactory; FakeSearchAsync; MemorySaver; ThinkingBlock; ReasoningBlock; ReflectionBlock; OutputBlock; OutputWrapper; LastBlockPreference; RawDecodeFallback; Strategy0Normalization; SanitizePipeline; CleanedLength; SanitizedDelta; GrokFast41; BugFixContext; Idempotent; NodeReasoningPolicy; MechanicalNode; AnalyticalNode; ReasoningEnabledOverride; OpenRouterExtraBody; ReasoningOffBodyFlag
+    </terms>
+    <annotation>
+      Backend implementation of Scenario 1 ("Complex Choice / Decision Maker") for the Gnome-Consultant multi-agent system. Infrastructure v2.2.0 — fully asynchronous orchestration core + centralised LLM response sanitization + Hybrid Reasoning Routing (T3: per-node reasoning policy — mechanical routing/parsing/NL-question nodes disable native chain-of-thought for latency/cost; analytical draft/critique/synthesis nodes keep reasoning ON for arithmetic-audit quality). A LangGraph-orchestrated analytical loop with 7 nodes, a Chain-of-Verification (CoVe) self-critique loop capped by an Anti-Loop guard, pluggable Tavily-backed async search with parallel query execution, and a human-in-the-loop interrupt that requests weight calibration from the user. Isolated under Vertical Feature Sliced (VFS) architecture: `src/core/` hosts reusable utilities (llm_client accepts `reasoning_enabled: Optional[bool]` — domain-agnostic); `src/features/decision_maker/` owns feature-specific `_NODE_REASONING_POLICY` map — concerns cleanly separated. LLM calls are routed through OpenRouter via ChatOpenAI.ainvoke() with optional `extra_body={"reasoning":{"enabled":false}}` per-node body parameter. Checkpointing uses AsyncSqliteSaver (production) or MemorySaver (tests) via Dependency Injection. Observability is guaranteed by strict LDD log formatting (`[CLASSIFIER][IMP:N][FN][BLOCK][OP] msg [STATUS]`) emitted into a single local file `decision_maker.log`; per-query IMP:7/IMP:8 pairing is preserved across concurrent branches.
+    </annotation>
+    <BusinessScenarios>
+      <Scenario NAME="StartDecisionSessionAsync">AsyncCaller -> await start_session(user_input, thread_id) -> AsyncSqliteSaver context opens -> graph runs until interrupt_after=3_Weight_Questioner -> returns {"status":"awaiting_user","question":...,"thread_id":...}</Scenario>
+      <Scenario NAME="ResumeAndSynthesizeAsync">AsyncCaller -> await resume_session(user_answer, thread_id) -> AsyncSqliteSaver reopens SAME DB -> aupdate_state injects user_answer -> graph runs Node3.5 -> Node4 -> Node5 (up to 1 rewrite) -> Node6 -> returns {"status":"done","final_answer":...,"thread_id":...}</Scenario>
+      <Scenario NAME="ParallelSearchExecution">tool_node -> builds coros=[search_fn(q) for q in state.search_queries] -> await asyncio.gather(*coros) -> per-query IMP:7/IMP:8 pairs logged (interleaving allowed) -> flattens results into tool_facts</Scenario>
+      <Scenario NAME="AntiHallucinationLoop">Internal -> cove_critique audits draft against facts -> on rewrite_count&gt;=2 force-approves to break potential loop (Anti-Loop safety IMP:10 BLOCK_ANTI_LOOP)</Scenario>
+      <Scenario NAME="MutualExclusionGuard">Internal -> context_analyzer emits routing flags -> route_from_context (sync) raises DoubleTrueError if needs_data AND ready_for_weights are both True</Scenario>
+      <Scenario NAME="PluggableSearchAdapter">search_async -> reads TAVILY_API_KEY at call-time -> if set: _build_tavily_adapter() -> AsyncTavilyClient.search() -> normalized result list; else: stub_search_async() -> deterministic single-item list</Scenario>
+      <Scenario NAME="ReasoningModelNormalization">safe_json_parse -> _strip_reasoning_blocks (thin wrapper over llm_utils.strip_reasoning_blocks as of v1.2.0) removes &lt;thinking&gt;/&lt;think&gt;/&lt;reasoning&gt;/&lt;reflection&gt; prefix -> Strategy 1..4 run on clean text -> if Strategy 4 greedy regex fails, Pass B json.JSONDecoder().raw_decode() finds first balanced JSON -> returns dict; JsonParseError.raw_snippet preserves ORIGINAL input</Scenario>
+      <Scenario NAME="LLMResponseSanitization">Any node -> await _invoke_llm_async(llm, system, human, node_name) -> ChatOpenAI.ainvoke -> raw_response = response.content -> sanitize_llm_response(raw) [strip_reasoning_blocks -> extract_output_payload (prefers LAST &lt;output&gt; block) -> .strip()] -> cleaned -> [API][IMP:8][BLOCK_SANITIZE] raw_length + cleaned_length + sanitized_delta logged -> return cleaned to caller node. All 6 LLM nodes (context_analyzer, weight_questioner, weight_parser, draft_generator, cove_critique, final_synthesizer) receive pre-sanitized payload; final_answer is therefore guaranteed free of &lt;thinking&gt;/&lt;output&gt;/&lt;reasoning&gt;/&lt;reflection&gt; tag leaks.</Scenario>
+      <Scenario NAME="HybridReasoningRouting">Caller node body -> looks up `_NODE_REASONING_POLICY["&lt;node_name&gt;"]` -> calls `build_llm(reasoning_enabled=&lt;bool&gt;)` -> llm_client resolves flag (explicit arg &gt; env &gt; default True) -> when False, injects `extra_body={"reasoning":{"enabled":false}}` into ChatOpenAI -&gt; OpenRouter forwards body param to provider (xAI/DeepSeek/OpenAI) which skips native chain-of-thought emission. Mechanical nodes (context_analyzer, weight_questioner, weight_parser) run reasoning=OFF — fast JSON/short NL. Analytical nodes (draft_generator, cove_critique, final_synthesizer) run reasoning=ON — preserve multi-step arithmetic/audit quality. Measured impact (grok-4.1-fast, smoke_fb6488ad): start_session -45% wall-clock, total -5%, quality preserved, cost flat.</Scenario>
+    </BusinessScenarios>
+  </Brainstorm_DecisionMaker_2_2_0_Info>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: src/core (reusable utilities — UNCHANGED in v2.0.0)        -->
+  <!-- ================================================================ -->
+
+  <src_core_llm_client_py FILE="src/core/llm_client.py" TYPE="UTILITY_MODULE" VERSION="1.2.0">
+    <keywords>OpenRouter; ChatOpenAI; LLMFactory; EnvDriven; BaseURL; Ainvoke; ReasoningEnabledFlag; HybridReasoningRouting; PerCallOverride; ExtraBody; DomainAgnostic; BackwardsCompatEnv</keywords>
+    <annotation>UPDATED in v2.2.0 (T3 — Hybrid Reasoning Routing). Factory for the OpenRouter-backed ChatOpenAI client. Reads OPENROUTER_MODEL and OPENROUTER_API_KEY from environment (no defaults — fails loudly). Adds OpenRouter attribution headers. v1.1.0 introduced the OPENROUTER_REASONING_ENABLED env toggle (falsy values "0"/"false"/"no"/"off" disable native chain-of-thought via `extra_body={"reasoning":{"enabled":false}}`). v1.2.0 adds an EXPLICIT `reasoning_enabled: Optional[bool]` parameter that overrides env when not None — enabling Hybrid Reasoning Routing (T3) where each feature module (e.g. decision_maker) decides per-node whether reasoning is on or off. The factory itself stays DOMAIN-AGNOSTIC: per-node policy belongs to the caller (decision_maker's `_NODE_REASONING_POLICY` map), keeping llm_client reusable across features. ChatOpenAI in langchain-openai 0.2.x natively supports await llm.ainvoke(messages) — no code change was required for async migration.</annotation>
+    <build_llm_FUNC NAME="build_llm" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>LLMFactory; OpenRouter; ChatOpenAI; Ainvoke; ReasoningEnabledParameter; ExtraBodyInjection; EnvFallback</keywords>
+      <annotation>Signature in v1.2.0: `def build_llm(temperature: float = 0.2, reasoning_enabled: Optional[bool] = None) -> ChatOpenAI`. Resolves reasoning flag with precedence explicit-arg &gt; env OPENROUTER_REASONING_ENABLED &gt; default True. When resolved to False, injects `extra_body={"reasoning":{"enabled":false}}` into ChatOpenAI kwargs — OpenRouter forwards the body parameter to the provider (xAI grok, DeepSeek, OpenAI o-series) which skips native `&lt;thinking&gt;`/`&lt;reasoning&gt;` block emission. Clients that don't support the toggle silently ignore it. Client supports both llm.invoke() (sync) and llm.ainvoke() (async) natively.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_nodes_py__invoke_llm_async_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_context_analyzer_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_weight_questioner_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_weight_parser_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_draft_generator_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_cove_critique_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_final_synthesizer_FUNC" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </build_llm_FUNC>
+  </src_core_llm_client_py>
+
+  <src_core_logger_py FILE="src/core/logger.py" TYPE="UTILITY_MODULE">
+    <keywords>LDD; Logger; DualHandler; FileHandler; StreamHandler; Idempotent; AsyncSafe</keywords>
+    <annotation>UNCHANGED in v2.0.0. Idempotent LDD logger factory. Attaches a FileHandler writing to brainstorm/decision_maker.log and a StreamHandler writing to stdout. Python's stdlib logging is thread- and event-loop-safe; async callers emit via the same named logger without contention.</annotation>
+    <setup_ldd_logger_FUNC NAME="setup_ldd_logger" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Idempotent; NamedLogger; LDDFormat</keywords>
+      <annotation>Returns the named logger "decision_maker"; guarded against double-handler registration via hasHandlers() check.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_nodes_py" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_graph_py" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_tools_py" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </setup_ldd_logger_FUNC>
+  </src_core_logger_py>
+
+  <src_core_llm_utils_py FILE="src/core/llm_utils.py" TYPE="UTILITY_MODULE" VERSION="1.0.0">
+    <keywords>LLMOutputSanitization; ReasoningModelNormalization; OutputWrapperExtraction; Idempotent; Pipeline; StdlibOnly; CentralizedSanitizer; BlockSanitize; BUG_FIX_CONTEXT; GrokFast41; DeepSeekR1; O1Family</keywords>
+    <annotation>NEW in v2.1.0 (Option D — centralised LLM response sanitization). Canonical stdlib-only (re) sanitization utilities applied ONCE at the single _invoke_llm_async call site so all six LLM nodes receive a pre-cleaned payload. Three pure idempotent functions form a small pipeline. Fixes two concrete production leaks observed on grok-4.1-fast: (1) weight_questioner silently returning last_question=''; (2) final_synthesizer leaking raw &lt;thinking&gt;/&lt;output&gt; tags into final_answer. Also preserves diagnostic trace: _invoke_llm_async logs BOTH raw_length (before sanitize) AND cleaned_length+sanitized_delta (after sanitize) — full visibility into how much was stripped per node per call. Pipeline is intentionally idempotent so repeated invocations are safe; extract_output_payload on absent/malformed &lt;output&gt; returns input unchanged (no data loss on non-reasoning models).</annotation>
+
+    <strip_reasoning_blocks_FUNC NAME="strip_reasoning_blocks" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>ReasoningTagRegex; DOTALL; IGNORECASE; ThinkingBlock; ReflectionBlock; Idempotent; StdlibRe</keywords>
+      <annotation>Regex-strips &lt;thinking&gt;, &lt;think&gt;, &lt;reasoning&gt;, &lt;reflection&gt; block-pairs using `re.sub(r'&lt;(thinking|think|reasoning|reflection)\b[^&gt;]*&gt;.*?&lt;/\1\s*&gt;', '', raw, flags=re.DOTALL | re.IGNORECASE)`. Handles nested example braces inside reasoning prose (they are removed with the block). Idempotent — applying twice yields the same result. Generalises across Grok 4.1 (&lt;thinking&gt;), DeepSeek-R1 (&lt;think&gt;), o1-family (&lt;reasoning&gt;), and &lt;reflection&gt; for future-compat.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_core_llm_utils_py_sanitize_llm_response_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_core_json_utils_py__strip_reasoning_blocks_FUNC" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </strip_reasoning_blocks_FUNC>
+
+    <extract_output_payload_FUNC NAME="extract_output_payload" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>OutputWrapperExtraction; LastBlockPreference; NonGreedyRegex; NoDataLossOnMiss; Idempotent</keywords>
+      <annotation>If &lt;output&gt;...&lt;/output&gt; wrapper present, returns the inner content trimmed. If wrapper absent/malformed, returns input UNCHANGED (critical — no data loss for non-reasoning models). When MULTIPLE &lt;output&gt; blocks are present, returns the LAST complete one — reasoning models occasionally echo the prompt's JSON example in their reasoning before writing their own structured answer; the last block is the authoritative output. Case-insensitive, DOTALL.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_core_llm_utils_py_sanitize_llm_response_FUNC" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </extract_output_payload_FUNC>
+
+    <sanitize_llm_response_FUNC NAME="sanitize_llm_response" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Pipeline; Idempotent; CanonicalEntryPoint; PublicSanitizer</keywords>
+      <annotation>Public pipeline entry point. Chains: strip_reasoning_blocks(raw) -&gt; extract_output_payload(...) -&gt; .strip(). Idempotent: sanitize(sanitize(x)) == sanitize(x) for all inputs (including empty string, whitespace-only, and already-clean payloads). ALWAYS returns a str. Called exactly once from _invoke_llm_async in nodes.py v2.1.0; all 6 LLM nodes receive the post-pipeline result.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_core_llm_utils_py_strip_reasoning_blocks_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_core_llm_utils_py_extract_output_payload_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_features_decision_maker_nodes_py__invoke_llm_async_FUNC" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </sanitize_llm_response_FUNC>
+  </src_core_llm_utils_py>
+
+  <src_core_json_utils_py FILE="src/core/json_utils.py" TYPE="UTILITY_MODULE" VERSION="1.2.0">
+    <keywords>JsonFence; SafeParse; JsonParseError; RawSnippet; PureCPU; DefenceInDepth; ThinWrapper; ReasoningModelNormalization; RawDecodeFallback; Strategy0; BugFixContext</keywords>
+    <annotation>UPDATED in v1.2.0 — _strip_reasoning_blocks collapsed to a thin wrapper delegating to llm_utils.strip_reasoning_blocks (DRY — canonical regex now lives in one place). Five-stage extraction pipeline preserved: Strategy 0 (normalisation via wrapper), Strategy 1 (raw json.loads), Strategy 2 (```json fenced), Strategy 3 (bare ``` fenced), Strategy 4 (greedy balanced-brace regex + Pass B json.JSONDecoder().raw_decode() fallback). Strategy 0 retained as DEFENCE-IN-DEPTH — harmless no-op on already-clean input produced by _invoke_llm_async, but protects any caller that bypasses that code path (e.g. future offline batch processors). Raises JsonParseError with raw_snippet preserving the ORIGINAL pre-normalisation input. No I/O — safe to call from async context.</annotation>
+
+    <JsonParseError_CLASS NAME="JsonParseError" TYPE="IS_CLASS_OF_MODULE">
+      <annotation>UNCHANGED in v1.2.0. Typed exception carrying raw_snippet (the ORIGINAL pre-parse text, NOT post-normalisation — invariant for LDD diagnostics) for IMP:10 ExceptionEnrichment logs.</annotation>
+    </JsonParseError_CLASS>
+
+    <safe_json_parse_FUNC NAME="safe_json_parse" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>FiveStageParser; Strategy0Normalization; RawDecodeFallback; RawSnippetPreservation; DefenceInDepth</keywords>
+      <annotation>Public parser. Unchanged flow in v1.2.0: (1) captures original input for raw_snippet; (2) invokes _strip_reasoning_blocks (thin wrapper over llm_utils.strip_reasoning_blocks); (3) runs Strategies 1..4 on `normalized`; (4) Strategy 4 Pass B invokes json.JSONDecoder().raw_decode(normalized, first_brace_idx) on regex failure; (5) on total failure raises JsonParseError(raw_snippet=original[:200]). Returns dict on success.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_core_json_utils_py__strip_reasoning_blocks_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_features_decision_maker_nodes_py_context_analyzer_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_weight_questioner_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_weight_parser_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_cove_critique_FUNC" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </safe_json_parse_FUNC>
+
+    <_strip_reasoning_blocks_FUNC NAME="_strip_reasoning_blocks" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>ThinWrapper; BackwardsCompat; DelegatesTo; DefenceInDepth</keywords>
+      <annotation>MODIFIED in v1.2.0 — now a THIN WRAPPER delegating to llm_utils.strip_reasoning_blocks. Keeps the internal symbol and Strategy 0 call chain in safe_json_parse unchanged for minimal diff. Canonical regex logic lives in llm_utils; this wrapper exists purely for backwards-compat and defence-in-depth for callers that bypass _invoke_llm_async.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_core_llm_utils_py_strip_reasoning_blocks_FUNC" TYPE="DELEGATES_TO" />
+        <Link TARGET="src_core_json_utils_py_safe_json_parse_FUNC" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </_strip_reasoning_blocks_FUNC>
+  </src_core_json_utils_py>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: src/features/decision_maker (feature slice — v2.0.0 async) -->
+  <!-- ================================================================ -->
+
+  <src_features_decision_maker_state_py FILE="src/features/decision_maker/state.py" TYPE="DATA_SCHEMA_MODULE">
+    <keywords>TypedDict; DecisionMakerState; StateSchema; Frozen</keywords>
+    <annotation>UNCHANGED in v2.0.0 (AC4). DecisionMakerState TypedDict with exactly 13 fields: user_input, is_data_sufficient, needs_data, ready_for_weights, search_queries, tool_facts, last_question, user_answer, weights, assumptions, draft_analysis, critique_feedback, rewrite_count, final_answer. Schema frozen to prevent graph-topology drift during infrastructure refactoring.</annotation>
+    <DecisionMakerState_CLASS NAME="DecisionMakerState" TYPE="IS_TYPEDDICT_OF_MODULE">
+      <annotation>Typed state bag carried by LangGraph across all 7 nodes. Fields are progressively populated by node functions; the graph topology relies on specific flag combinations for routing.</annotation>
+    </DecisionMakerState_CLASS>
+  </src_features_decision_maker_state_py>
+
+  <src_features_decision_maker_prompts_py FILE="src/features/decision_maker/prompts.py" TYPE="CONSTANTS_MODULE">
+    <keywords>Prompts; GlobalPriming; NodePrompts; VerbatimConstants; BusinessLogicFreeze</keywords>
+    <annotation>UNCHANGED in v2.0.0 (hard invariant — business-logic freeze). Verbatim prompt constants: GLOBAL_PRIMING, NODE_1_CONTEXT_ANALYZER_PROMPT, NODE_3_WEIGHT_QUESTIONER_PROMPT, NODE_35_WEIGHT_PARSER_PROMPT, NODE_4_DRAFT_GENERATOR_PROMPT, NODE_5_COVE_CRITIQUE_PROMPT, NODE_6_FINAL_SYNTHESIZER_PROMPT. No LLM calls — constants only.</annotation>
+  </src_features_decision_maker_prompts_py>
+
+  <src_features_decision_maker_tools_py FILE="src/features/decision_maker/tools.py" TYPE="UTILITY_MODULE">
+    <keywords>PluggableAdapter; AsyncIO; Tavily; AsyncTavilyClient; StubSearch; PerCallResolution; LDDPerQuery</keywords>
+    <annotation>REWRITTEN in v2.0.0. Pluggable async search abstraction. Public search_async(query) resolves the adapter at call-time: Tavily when TAVILY_API_KEY is set, else stub_search_async. Private _build_tavily_adapter() constructs AsyncTavilyClient(api_key=...) and returns a normalising async callable. Emits [API][IMP:7]...query={q!r}...[PENDING] before the outbound call and [API][IMP:8]...query={q!r} items={n}...[SUCCESS] on response — one pair per query. Return shape: List[Dict[query,result,source]] matching tool_facts list semantics.</annotation>
+
+    <search_async_FUNC NAME="search_async" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>AsyncPublicEntry; PluggableAdapter; PerCallResolution; LDDPair</keywords>
+      <annotation>Public async entry. Resolves adapter at call-time via TAVILY_API_KEY presence check. Emits the IMP:7 PENDING marker, awaits the adapter, emits IMP:8 SUCCESS marker with item count. Returns List[Dict] suitable for flattening into tool_facts.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_nodes_py_tool_node_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_features_decision_maker_tools_py__build_tavily_adapter_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_features_decision_maker_tools_py_stub_search_async_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </search_async_FUNC>
+
+    <stub_search_async_FUNC NAME="stub_search_async" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Stub; AsyncIO; DeterministicResult; OfflineFallback</keywords>
+      <annotation>Deterministic async stub: `await asyncio.sleep(0)` + returns [{"query": q, "result": "&lt;stubbed-fact&gt;", "source": "stub"}]. Selected automatically when TAVILY_API_KEY is absent — guarantees tests and offline development never make real network calls.</annotation>
+    </stub_search_async_FUNC>
+
+    <_build_tavily_adapter_FUNC NAME="_build_tavily_adapter" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>PrivateFactory; AsyncTavilyClient; Normaliser; AdapterPattern</keywords>
+      <annotation>Private factory. Constructs AsyncTavilyClient(api_key=...) and returns a bound async callable `async def adapter(query) -> List[Dict]` that normalises Tavily's .search() response to the {query, result, source} shape. Encapsulates backend-specific construction — allows future swap of search provider without touching search_async.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_tools_py_search_async_FUNC" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </_build_tavily_adapter_FUNC>
+  </src_features_decision_maker_tools_py>
+
+  <src_features_decision_maker_nodes_py FILE="src/features/decision_maker/nodes.py" TYPE="BUSINESS_LOGIC_MODULE" VERSION="2.2.0">
+    <keywords>LangGraphNodes; AsyncDef; AsyncioGather; AntiLoop; DoubleTrueError; CoVe; LDDMarkers; DependencyInjection; Routers; PureStateInspector; LLMOutputSanitization; BlockSanitize; CentralisedCleaning; HybridReasoningRouting; NodeReasoningPolicy; MechanicalNodes; AnalyticalNodes; ReasoningEnabledPerNode</keywords>
+    <annotation>UPDATED to v2.2.0 (T3 — Hybrid Reasoning Routing). v2.1.0 sanitization pipeline preserved verbatim. ONLY CHANGE: NEW module-level constant `_NODE_REASONING_POLICY: dict[str, bool]` classifies each of 6 LLM nodes as MECHANICAL (reasoning=False: context_analyzer, weight_questioner, weight_parser) or ANALYTICAL (reasoning=True: draft_generator, cove_critique, final_synthesizer); all 6 `build_llm()` call-sites updated to `build_llm(reasoning_enabled=_NODE_REASONING_POLICY["&lt;node_name&gt;"])`. `_invoke_llm_async`, sanitization pipeline, LDD markers, node bodies, `tool_node`, and routers UNCHANGED. Safety invariants preserved verbatim: DoubleTrueError in route_from_context on mutually exclusive flags; Anti-Loop cap in cove_critique forces needs_rewrite=False when rewrite_count&gt;=2 and emits [LOGIC][IMP:10][BLOCK_ANTI_LOOP][SafetyTripped]. Real-network A/B (grok-4.1-fast, smoke_fb6488ad): start_session -45% wall-clock (mechanical nodes), total -5%, LLM calls 9 (parity), cost flat, CoVe arithmetic audit quality preserved.</annotation>
+
+    <_NODE_REASONING_POLICY_CONST NAME="_NODE_REASONING_POLICY" TYPE="IS_CONSTANT_OF_MODULE">
+      <keywords>ModuleConstant; HybridReasoningRouting; NodeClassification; MechanicalVsAnalytical; PolicyMap; DomainPolicy</keywords>
+      <annotation>NEW in v2.2.0. Module-level `dict[str, bool]` mapping LLM node names to their reasoning policy. Keys mirror the 6 LLM node function names; values are True (reasoning ON — analytical) or False (reasoning OFF — mechanical). Classification rationale lives in the inline RATIONALE block above the dict. Read at each LLM call-site to parameterise `build_llm(reasoning_enabled=...)`. The boundary between mechanical and analytical is task-specific (decision_maker concern) and therefore lives in the feature module rather than the domain-agnostic llm_client factory. Concrete mapping: context_analyzer=False (JSON routing flags), weight_questioner=False (single short NL question), weight_parser=False (JSON weights extraction), draft_generator=True (math-heavy weighted comparison), cove_critique=True (arithmetic audit — caught FV-annuity bug end-to-end), final_synthesizer=True (multi-section structured Markdown synthesis).</annotation>
+      <CrossLinks>
+        <Link TARGET="src_core_llm_client_py_build_llm_FUNC" TYPE="FEEDS_PARAMETER_TO" />
+        <Link TARGET="src_features_decision_maker_nodes_py_context_analyzer_FUNC" TYPE="READ_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_weight_questioner_FUNC" TYPE="READ_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_weight_parser_FUNC" TYPE="READ_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_draft_generator_FUNC" TYPE="READ_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_cove_critique_FUNC" TYPE="READ_BY" />
+        <Link TARGET="src_features_decision_maker_nodes_py_final_synthesizer_FUNC" TYPE="READ_BY" />
+      </CrossLinks>
+    </_NODE_REASONING_POLICY_CONST>
+
+    <DoubleTrueError_CLASS NAME="DoubleTrueError" TYPE="IS_CLASS_OF_MODULE">
+      <keywords>CustomException; SafetyGuard; MutualExclusion</keywords>
+      <annotation>UNCHANGED class. Raised only inside sync router route_from_context when context_analyzer emits both needs_data=True and ready_for_weights=True. Indicates LLM prompt-following failure; treated as fatal routing error.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_nodes_py_route_from_context_FUNC" TYPE="RAISED_BY" />
+      </CrossLinks>
+    </DoubleTrueError_CLASS>
+
+    <_invoke_llm_async_FUNC NAME="_invoke_llm_async" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>PrivateAsyncHelper; Ainvoke; LLMCall; LDDPair; LLMOutputSanitization; BlockSanitize; CleanedLengthLog; CentralisedCleaning</keywords>
+      <annotation>UPDATED in v2.1.0 (Option D). Signature: `async def _invoke_llm_async(llm, system_text, human_text, node_name) -> str`. Flow: builds [SystemMessage, HumanMessage], emits [API][IMP:7][BLOCK_LLM_CALL][ExternalCall] PENDING, awaits llm.ainvoke(messages), captures raw_response = response.content, emits [API][IMP:8][BLOCK_LLM_CALL][ResponseReceived] raw_length=N SUCCESS, calls `cleaned = sanitize_llm_response(raw_response)` from llm_utils, emits NEW [API][IMP:8][BLOCK_SANITIZE][Sanitized] cleaned_length=M sanitized_delta=(N-M) SUCCESS, returns `cleaned` (NOT raw_response). All callers (6 LLM nodes) now receive sanitized payload without any change to their own bodies.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_core_llm_client_py_build_llm_FUNC" TYPE="USES_FUNCTION" />
+        <Link TARGET="src_core_llm_utils_py_sanitize_llm_response_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </_invoke_llm_async_FUNC>
+
+    <context_analyzer_FUNC NAME="context_analyzer" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Node1; AsyncDef; JSONParse; RoutingFlags; IMP5; IMP9; MechanicalNode; ReasoningOff</keywords>
+      <annotation>Node 1 — async. `async def context_analyzer(state, llm_factory=None) -> dict`. MECHANICAL node (T3): calls `build_llm(reasoning_enabled=_NODE_REASONING_POLICY["context_analyzer"])` which is False — native chain-of-thought disabled for this JSON-emitting routing step. Awaits _invoke_llm_async(GLOBAL_PRIMING+NODE_1_prompt, human_text). Parses JSON via safe_json_parse, writes needs_data / ready_for_weights / is_data_sufficient / search_queries flags to state. Post-parse state write identical to v1.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_nodes_py__invoke_llm_async_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_core_json_utils_py_safe_json_parse_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </context_analyzer_FUNC>
+
+    <tool_node_FUNC NAME="tool_node" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Node2; AsyncDef; AsyncioGather; ParallelSearch; SearchFnDI; PerQueryLDD</keywords>
+      <annotation>Node 2 — async + parallel. `async def tool_node(state, search_fn=None) -> dict`. Resolves search_fn (default: tools.search_async). Builds coros=[search_fn(q) for q in state.search_queries]; awaits results=await asyncio.gather(*coros). Flattens via itertools.chain.from_iterable and appends to tool_facts. Parallel-execution invariant: N queries complete in ~max(single) wall-time rather than sum. Per-query IMP:7/IMP:8 LDD pairs emitted (interleaving permitted per AC13).</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_tools_py_search_async_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </tool_node_FUNC>
+
+    <weight_questioner_FUNC NAME="weight_questioner" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Node3; AsyncDef; CalibrationQuestion; InterruptTarget; MechanicalNode; ReasoningOff</keywords>
+      <annotation>Node 3 — async. MECHANICAL node (T3): `build_llm(reasoning_enabled=_NODE_REASONING_POLICY["weight_questioner"])` = False — single short NL question, no multi-step reasoning needed. Generates calibration question and writes last_question. Graph interrupts AFTER this node via interrupt_after=["3_Weight_Questioner"]. Identical body to v1 except async def + await _invoke_llm_async.</annotation>
+    </weight_questioner_FUNC>
+
+    <weight_parser_FUNC NAME="weight_parser" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Node3_5; AsyncDef; ParseUserAnswer; WeightsJSON; MechanicalNode; ReasoningOff</keywords>
+      <annotation>Node 3.5 — async. MECHANICAL node (T3): `build_llm(reasoning_enabled=_NODE_REASONING_POLICY["weight_parser"])` = False — pure JSON extraction from user's NL answer. Parses human user_answer into weights dict (and optional assumptions). Identical body to v1 except async def + await _invoke_llm_async.</annotation>
+    </weight_parser_FUNC>
+
+    <draft_generator_FUNC NAME="draft_generator" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Node4; AsyncDef; DraftAnalysis; MarkdownDraft; AnalyticalNode; ReasoningOn</keywords>
+      <annotation>Node 4 — async. ANALYTICAL node (T3): `build_llm(reasoning_enabled=_NODE_REASONING_POLICY["draft_generator"])` = True — math-heavy weighted comparison over tool_facts requires native chain-of-thought. Generates draft_analysis from dilemma + weights + tool_facts (+ optional critique_feedback on rewrite). Identical body to v1 except async def + await _invoke_llm_async.</annotation>
+    </draft_generator_FUNC>
+
+    <cove_critique_FUNC NAME="cove_critique" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Node5; AsyncDef; CoVe; AntiLoop; SafetyCap; BlockAntiLoop; IMP10; AnalyticalNode; ReasoningOn; ArithmeticAudit</keywords>
+      <annotation>Node 5 — async CoVe auditor. ANALYTICAL node (T3): `build_llm(reasoning_enabled=_NODE_REASONING_POLICY["cove_critique"])` = True — arithmetic audit with native reasoning (empirically caught FV-annuity bug on real grok-4.1-fast traffic). Anti-Loop cap PRESERVED VERBATIM: if rewrite_count&gt;=2, force needs_rewrite=False and emit [LOGIC][IMP:10][cove_critique][BLOCK_ANTI_LOOP][SafetyTripped] log line. Otherwise, if LLM requests rewrite, increment rewrite_count.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_core_json_utils_py_safe_json_parse_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_features_decision_maker_nodes_py__invoke_llm_async_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </cove_critique_FUNC>
+
+    <final_synthesizer_FUNC NAME="final_synthesizer" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>Node6; AsyncDef; FinalAnswer; Markdown; TerminalNode; AnalyticalNode; ReasoningOn</keywords>
+      <annotation>Node 6 — async. ANALYTICAL node (T3): `build_llm(reasoning_enabled=_NODE_REASONING_POLICY["final_synthesizer"])` = True — multi-section structured Markdown synthesis benefits from native reasoning for consistency. Packages final_answer Markdown from accumulated state. Identical body to v1 except async def + await _invoke_llm_async.</annotation>
+    </final_synthesizer_FUNC>
+
+    <route_from_context_FUNC NAME="route_from_context" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>SyncRouter; PureStateInspector; DoubleTrueGuard; ConditionalEdge</keywords>
+      <annotation>SYNC. Pure state inspector, no I/O. Raises DoubleTrueError when both needs_data and ready_for_weights are True. Returns "tool" when needs_data-only, "questioner" when ready_for_weights-only. LangGraph accepts mixed sync/async across nodes and routers.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_nodes_py_DoubleTrueError_CLASS" TYPE="RAISES" />
+      </CrossLinks>
+    </route_from_context_FUNC>
+
+    <route_from_critique_FUNC NAME="route_from_critique" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>SyncRouter; PureStateInspector; RewriteOrFinalize; ConditionalEdge</keywords>
+      <annotation>SYNC. Pure state inspector. Returns "rewrite" iff critique_feedback non-empty AND rewrite_count&lt;2; else "finalize". Signature and behaviour unchanged from v1.</annotation>
+    </route_from_critique_FUNC>
+  </src_features_decision_maker_nodes_py>
+
+  <src_features_decision_maker_graph_py FILE="src/features/decision_maker/graph.py" TYPE="ORCHESTRATION_MODULE">
+    <keywords>StateGraphAssembly; AsyncSessionAPI; AsyncSqliteSaver; PerCallCheckpointerContext; DependencyInjection; InterruptAfter; ConceptA</keywords>
+    <annotation>REFACTORED in v2.0.0. Graph assembly factored into a SYNC `build_graph(checkpointer)` that wires the topology AND accepts a pre-built checkpointer via Dependency Injection (no more internal SqliteSaver construction). Public API `start_session` and `resume_session` become `async def` and internally open `AsyncSqliteSaver.from_conn_string(path)` as an async context manager per call — this is the "per-call checkpointer context" pattern from Concept A. Clean lifecycle; tests pass MemorySaver() directly into build_graph. Graph topology (7 nodes + edges + interrupt_after=["3_Weight_Questioner"]) is FROZEN from v1 (AC5).</annotation>
+
+    <build_graph_FUNC NAME="build_graph" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>SyncFactory; StateGraphCompile; DependencyInjection; InterruptAfter; AC5</keywords>
+      <annotation>SYNC factory. Signature: `def build_graph(checkpointer) -> CompiledStateGraph`. Caller is responsible for checkpointer lifecycle. Wires the SAME 7 nodes + conditional edges as v1. Compiles with `checkpointer=checkpointer, interrupt_after=["3_Weight_Questioner"]`.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_nodes_py_context_analyzer_FUNC" TYPE="REGISTERS_NODE" />
+        <Link TARGET="src_features_decision_maker_nodes_py_tool_node_FUNC" TYPE="REGISTERS_NODE" />
+        <Link TARGET="src_features_decision_maker_nodes_py_weight_questioner_FUNC" TYPE="REGISTERS_NODE" />
+        <Link TARGET="src_features_decision_maker_nodes_py_weight_parser_FUNC" TYPE="REGISTERS_NODE" />
+        <Link TARGET="src_features_decision_maker_nodes_py_draft_generator_FUNC" TYPE="REGISTERS_NODE" />
+        <Link TARGET="src_features_decision_maker_nodes_py_cove_critique_FUNC" TYPE="REGISTERS_NODE" />
+        <Link TARGET="src_features_decision_maker_nodes_py_final_synthesizer_FUNC" TYPE="REGISTERS_NODE" />
+        <Link TARGET="src_features_decision_maker_nodes_py_route_from_context_FUNC" TYPE="REGISTERS_CONDITIONAL_EDGE" />
+        <Link TARGET="src_features_decision_maker_nodes_py_route_from_critique_FUNC" TYPE="REGISTERS_CONDITIONAL_EDGE" />
+      </CrossLinks>
+    </build_graph_FUNC>
+
+    <start_session_FUNC NAME="start_session" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>AsyncPublicAPI; AsyncSqliteSaver; Ainvoke; AgetState; AwaitingUser; AC8; AC9</keywords>
+      <annotation>`async def start_session(user_input, thread_id, checkpoint_path=None) -> dict`. Opens `async with AsyncSqliteSaver.from_conn_string(path) as cp:`, calls `graph = build_graph(cp)`, `await graph.ainvoke(initial_state, config)` (runs until interrupt after Node 3), reads `snapshot = await graph.aget_state(config)`. Return: {"status":"awaiting_user","question":last_question,"thread_id":thread_id}.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_graph_py_build_graph_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </start_session_FUNC>
+
+    <resume_session_FUNC NAME="resume_session" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>AsyncPublicAPI; AsyncSqliteSaver; AupdateState; Ainvoke; FinalAnswer; AC8</keywords>
+      <annotation>`async def resume_session(user_answer, thread_id, checkpoint_path=None) -> dict`. Opens the SAME async checkpointer ctx, rebuilds graph (stateless factory), `await graph.aupdate_state(config, {"user_answer": user_answer})`, `await graph.ainvoke(None, config)` (continues past interrupt through Node 3.5 → 4 → 5 → 6), reads terminal snapshot. Return: {"status":"done","final_answer":final_answer,"thread_id":thread_id}.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_graph_py_build_graph_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </resume_session_FUNC>
+
+    <stream_session_FUNC NAME="stream_session" TYPE="IS_ASYNC_GEN_OF_MODULE">
+      <keywords>AsyncGenerator; AstreamUpdates; PerCallCheckpointerContext; AwaitingUserTerminator; UIStream; AC_UI_03; AC_UI_07</keywords>
+      <annotation>NEW in v3.0.0. `async def stream_session(user_input, thread_id, checkpoint_path=None) -> AsyncIterator[dict]`. Opens `async with AsyncSqliteSaver.from_conn_string(path) as cp:`, builds graph via DI, seeds initial_state = {user_input, tool_facts=[], rewrite_count=0}, then `async for chunk in graph.astream(initial_state, config, stream_mode="updates"): yield chunk`. After the stream naturally ends (interrupt reached after 3_Weight_Questioner), reads `snapshot = await graph.aget_state(config)`, yields a final terminator dict `{"__terminator__": "awaiting_user", "question": snapshot.values.get("last_question",""), "thread_id": thread_id}`. Does NOT raise on interrupt — interrupt is the expected terminal state of leg 1. Consumed by src/ui/controllers.py::orchestrate_start. Parallel to start_session (non-streaming variant preserved for smoke_run.py + backend tests).</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_graph_py_build_graph_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_ui_controllers_py_orchestrate_start_FUNC" TYPE="CALLED_BY" />
+      </CrossLinks>
+    </stream_session_FUNC>
+
+    <stream_resume_session_FUNC NAME="stream_resume_session" TYPE="IS_ASYNC_GEN_OF_MODULE">
+      <keywords>AsyncGenerator; AstreamUpdates; AupdateState; FinalAnswerTerminator; UIStream; AC_UI_03</keywords>
+      <annotation>NEW in v3.0.0. `async def stream_resume_session(user_answer, thread_id, checkpoint_path=None) -> AsyncIterator[dict]`. Opens `async with AsyncSqliteSaver.from_conn_string(path) as cp:`, rebuilds graph, `await graph.aupdate_state(config, {"user_answer": user_answer})`, then `async for chunk in graph.astream(None, config, stream_mode="updates"): yield chunk` (runs through 3.5_Weight_Parser → 4_Draft_Generator → 5_CoVe_Critique (with possible rewrite loop) → 6_Final_Synthesizer → END). After stream ends, reads terminal snapshot and yields `{"__terminator__": "done", "final_answer": snapshot.values.get("final_answer",""), "thread_id": thread_id}`. Consumed by src/ui/controllers.py::orchestrate_resume.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_graph_py_build_graph_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_ui_controllers_py_orchestrate_resume_FUNC" TYPE="CALLED_BY" />
+      </CrossLinks>
+    </stream_resume_session_FUNC>
+  </src_features_decision_maker_graph_py>
+
+  <src_features_decision_maker_init_py FILE="src/features/decision_maker/__init__.py" TYPE="PACKAGE_INIT_MODULE">
+    <keywords>PackageReExports; PublicSurface; StreamingAPI</keywords>
+    <annotation>Bumped v1.0.0 → v1.1.0 in v3.0.0. `__all__` extended to re-export streaming variants alongside existing non-streaming API. Current public surface: start_session, resume_session, stream_session, stream_resume_session. No other changes.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_features_decision_maker_graph_py_start_session_FUNC" TYPE="REEXPORTS" />
+      <Link TARGET="src_features_decision_maker_graph_py_resume_session_FUNC" TYPE="REEXPORTS" />
+      <Link TARGET="src_features_decision_maker_graph_py_stream_session_FUNC" TYPE="REEXPORTS" />
+      <Link TARGET="src_features_decision_maker_graph_py_stream_resume_session_FUNC" TYPE="REEXPORTS" />
+    </CrossLinks>
+  </src_features_decision_maker_init_py>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: src/ui (Gradio Agentic UX — NEW in v3.0.0)                 -->
+  <!-- ================================================================ -->
+
+  <src_ui_controllers_py FILE="src/ui/controllers.py" TYPE="UI_CONTROLLER_MODULE">
+    <keywords>UIEvent; AsyncGenerator; FrameworkAgnostic; DomainEventStream; CoVeDetection; NoGradioImport; AC_UI_04; AC_UI_07; AC_UI_08</keywords>
+    <annotation>NEW in v3.0.0. Framework-agnostic async orchestration layer. Does NOT import gradio (AC_UI_04 — verified by test_no_gradio_import_in_controllers_or_presenter). Provides two async-generator orchestration functions that consume stream_session / stream_resume_session and emit a normalised stream of UIEvent dicts for downstream presenter/UI rendering. This is the headless-testable seam: tests mock stream_session with a scripted async generator and assert exact UIEvent counts/ordering. Log classifier: [UIEvent].</annotation>
+
+    <UIEvent_TYPEDDICT NAME="UIEvent" TYPE="IS_TYPEDDICT_OF_MODULE">
+      <keywords>TypedDict; EventSchema; 9Kinds</keywords>
+      <annotation>`class UIEvent(TypedDict, total=False)`. kind: Literal["session_started","node_started","node_completed","state_snapshot","cove_rewrite","awaiting_user","resume_started","final_answer","error"]. Additional optional fields: node, state_delta, state_snapshot, question, critique_feedback, final_answer, error_message, thread_id. The contract between controllers and presenter.</annotation>
+    </UIEvent_TYPEDDICT>
+
+    <orchestrate_start_FUNC NAME="orchestrate_start" TYPE="IS_ASYNC_GEN_OF_MODULE">
+      <keywords>AsyncGenerator; StreamSessionConsumer; SessionStarted; AwaitingUser; AC_UI_07</keywords>
+      <annotation>`async def orchestrate_start(user_input, thread_id, checkpoint_path=None) -> AsyncIterator[UIEvent]`. Yields session_started (once, with thread_id), then iterates stream_session. For each astream chunk: emits node_completed (with node name + state_delta) followed by state_snapshot (with aget_state values). On 5_CoVe_Critique chunk where decision="rewrite" and critique_feedback is non-empty, emits cove_rewrite UIEvent BEFORE the corresponding node_completed (ordering contract, AC_UI_08). Final yield: awaiting_user (question from terminator). On exception: error event with error_message.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_graph_py_stream_session_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_ui_controllers_py__extract_cove_rewrite_event_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </orchestrate_start_FUNC>
+
+    <orchestrate_resume_FUNC NAME="orchestrate_resume" TYPE="IS_ASYNC_GEN_OF_MODULE">
+      <keywords>AsyncGenerator; StreamResumeConsumer; ResumeStarted; FinalAnswer; CoVeVisibility</keywords>
+      <annotation>`async def orchestrate_resume(user_answer, thread_id, checkpoint_path=None) -> AsyncIterator[UIEvent]`. Yields resume_started (once), then iterates stream_resume_session with same node_completed/state_snapshot pair pattern + cove_rewrite injection. Terminates with final_answer UIEvent extracted from terminator.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_graph_py_stream_resume_session_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_ui_controllers_py__extract_cove_rewrite_event_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </orchestrate_resume_FUNC>
+
+    <_extract_cove_rewrite_event_FUNC NAME="_extract_cove_rewrite_event" TYPE="IS_PRIVATE_HELPER_OF_MODULE">
+      <keywords>PureFunction; CoVeDetection; RewriteDecision</keywords>
+      <annotation>Pure helper. Input: state_delta dict from a 5_CoVe_Critique chunk. If `state_delta.get("decision") == "rewrite"` AND `state_delta.get("critique_feedback")` truthy → returns UIEvent `{"kind":"cove_rewrite","critique_feedback":...}`, else returns None. Called by both orchestrate_start and orchestrate_resume before emitting node_completed for Node 5.</annotation>
+    </_extract_cove_rewrite_event_FUNC>
+  </src_ui_controllers_py>
+
+  <src_ui_presenter_py FILE="src/ui/presenter.py" TYPE="UI_PRESENTER_MODULE">
+    <keywords>PureRenderer; UIEventDispatcher; GradioMessagesFormat; StateXRayFilter; RussianStatus; AC_UI_10</keywords>
+    <annotation>NEW in v3.0.0. Pure rendering layer — no I/O, no globals, no async. Converts UIEvent into a tuple of Gradio-renderable deltas: (new_chat_history, new_state_snapshot, status_markdown). Does NOT import gradio itself (chat_history format follows Gradio-5 messages convention as list-of-dicts `{"role":"user"|"assistant","content":str}`). Easily table-tested per AC_UI_10.</annotation>
+
+    <render_FUNC NAME="render" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>EventDispatch; ChatHistoryAppend; StateSnapshotUpdate; StatusText</keywords>
+      <annotation>`def render(event: UIEvent, chat_history: list[dict], state_snapshot: dict) -> tuple[list[dict], dict, str]`. Dispatches on event["kind"] through a table of handlers (one per 9 UIEvent kinds). session_started/resume_started reset state. node_completed updates status. state_snapshot replaces the right-column JSON (filtered). cove_rewrite appends an assistant message with "⚠️ CoVe-критика:\n\n{critique_feedback}" and sets status "🚨 Критик нашел ошибку, переписываю...". awaiting_user appends assistant turn with the calibration question. final_answer appends assistant turn with final Markdown, sets "✅ Готово". error appends error message and sets "❌" status.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_ui_presenter_py__filter_state_for_display_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_ui_presenter_py__format_status_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </render_FUNC>
+
+    <_filter_state_for_display_FUNC NAME="_filter_state_for_display" TYPE="IS_PRIVATE_HELPER_OF_MODULE">
+      <keywords>StateFilter; TruncateLongStrings; HumanReadableSubset</keywords>
+      <annotation>Pure helper. Drops internal/verbose fields (user_input full text, etc.) and keeps the human-readable subset: dilemma, search_queries, tool_facts, weights, rewrite_count, critique_feedback, decision, final_answer. Truncates long string values to 500 chars with ellipsis suffix.</annotation>
+    </_filter_state_for_display_FUNC>
+
+    <_format_status_FUNC NAME="_format_status" TYPE="IS_PRIVATE_HELPER_OF_MODULE">
+      <keywords>StatusFormatter; EmojiPrefix; RussianText; NodeIdToHumanName</keywords>
+      <annotation>Pure helper. `def _format_status(event_kind: str, node: Optional[str], **extras) -> str`. Maps (kind, node) to Russian emoji-prefixed markdown strings per task spec §2.1: "⏳ Узел 1: Анализ контекста...", "🌐 Выполнение N параллельных запросов...", "🚨 Критик нашел ошибку, переписываю (попытка X/2)", "🤔 Нужен ваш ответ", "✅ Готово", "❌ Ошибка: ...".</annotation>
+    </_format_status_FUNC>
+  </src_ui_presenter_py>
+
+  <src_ui_app_py FILE="src/ui/app.py" TYPE="UI_COMPOSITION_ROOT">
+    <keywords>GradioBlocks; BuildUI; OnSubmit; OnNewSession; TwoColumnLayout; ChatbotMessages; JSONStateXRay; UUID4ThreadId; ModeState; LazyImport</keywords>
+    <annotation>NEW in v3.0.0. SOLE gradio importer in src/ (AC_UI_04). Defines build_ui() -> gr.Blocks factory for scripts/run_brainstorm_ui.py. Two-column layout per task spec §2.2: LEFT = gr.Chatbot(type="messages"), gr.Textbox, gr.Button("Отправить"), gr.Markdown for status, "Новая сессия" button; RIGHT = gr.JSON(label="State X-Ray"). gr.State holds thread_id (uuid4), mode ("awaiting_submit" | "awaiting_user_answer"), chat_history list, state_snapshot dict. Log classifier: [UIEvent].</annotation>
+
+    <build_ui_FUNC NAME="build_ui" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>BlocksFactory; Wiring; GradioComponents</keywords>
+      <annotation>`def build_ui() -> gr.Blocks`. Composes the two-column Blocks, instantiates all Gradio components, binds on_submit to the submit button's click handler (and textbox submit), binds on_new_session to the reset button.</annotation>
+    </build_ui_FUNC>
+
+    <on_submit_FUNC NAME="on_submit" TYPE="IS_ASYNC_GEN_HANDLER_OF_MODULE">
+      <keywords>AsyncGeneratorHandler; ModeDispatch; RenderLoop; SixSlotTuple; AC_UI_09; AC_UI_17</keywords>
+      <annotation>`async def on_submit(user_input, thread_id, mode, chat_history, state_snapshot) -> AsyncIterator[tuple]`. Dispatches: `mode=="awaiting_submit"` → orchestrate_start; `mode=="awaiting_user_answer"` → orchestrate_resume. For each UIEvent: calls render(), yields 6-slot tuple `(chat_history, state_snapshot, status_md, new_mode, thread_id, "")`. Mode transitions at awaiting_user (→ "awaiting_user_answer") and final_answer (→ "awaiting_submit"). Thread_id persists across events (AC_UI_17). Emits [BeliefState][IMP:9] logs at dispatch and completion.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_ui_controllers_py_orchestrate_start_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_ui_controllers_py_orchestrate_resume_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_ui_presenter_py_render_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </on_submit_FUNC>
+
+    <on_new_session_FUNC NAME="on_new_session" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>SessionReset; Uuid4ThreadId; ClearState</keywords>
+      <annotation>`def on_new_session() -> tuple`. Generates fresh uuid4 thread_id, clears chat_history to [], resets state_snapshot to {}, sets status to "Готов принять дилемму.", mode to "awaiting_submit". Bound to "Новая сессия" button.</annotation>
+    </on_new_session_FUNC>
+  </src_ui_app_py>
+
+  <src_ui_init_py FILE="src/ui/__init__.py" TYPE="PACKAGE_INIT_MODULE">
+    <keywords>PackageMarker; ReExport; BuildUIFactory</keywords>
+    <annotation>NEW in v3.0.0. Re-exports `build_ui` from app.py for scripts/run_brainstorm_ui.py consumption. Internal controllers/presenter modules are implementation detail and NOT re-exported.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_ui_app_py_build_ui_FUNC" TYPE="REEXPORTS" />
+    </CrossLinks>
+  </src_ui_init_py>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: tests (pytest + pytest-asyncio, 20 tests total)            -->
+  <!-- ================================================================ -->
+
+  <tests_conftest_py FILE="src/features/decision_maker/tests/conftest.py" TYPE="TEST_INFRA_MODULE">
+    <keywords>Conftest; AsyncFixtures; MemorySaver; FakeLlm; FakeSearchAsync; AntiLoopSessionHook; EventLoop; LDDCapture</keywords>
+    <annotation>REFACTORED in v2.0.0. Preserves Anti-Loop session hooks (.test_counter.json) verbatim. NEW fixtures: (a) event_loop_policy (pytest-asyncio session scope), (b) memory_checkpointer yielding fresh MemorySaver() per test, (c) fake_llm with async-aware .ainvoke(messages)→AIMessage, (d) fake_search_async with configurable sleep delay (DELAY=0.2s) used by test_parallel_search to prove concurrency. ldd_capture(caplog) helper preserved.</annotation>
+  </tests_conftest_py>
+
+  <tests_test_routing_py FILE="src/features/decision_maker/tests/test_routing.py" TYPE="TEST_MODULE">
+    <keywords>SyncTests; RouterTests; DoubleTrueError; AC7</keywords>
+    <annotation>SYNC — routers are sync. Asserts double-True raises DoubleTrueError; {needs_data:true} → "tool"; {ready_for_weights:true} → "questioner".</annotation>
+    <CrossLinks>
+      <Link TARGET="src_features_decision_maker_nodes_py_route_from_context_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_features_decision_maker_nodes_py_route_from_critique_FUNC" TYPE="TESTS" />
+    </CrossLinks>
+  </tests_test_routing_py>
+
+  <tests_test_anti_loop_py FILE="src/features/decision_maker/tests/test_anti_loop.py" TYPE="TEST_MODULE">
+    <keywords>AsyncTest; PytestAsyncio; AntiLoop; IMP10; BLOCK_ANTI_LOOP; AC6</keywords>
+    <annotation>@pytest.mark.asyncio. Seeds state with rewrite_count=2, awaits cove_critique(state, llm_factory=fake_llm_factory), asserts returned dict has rewrite_count unchanged AND [IMP:10][BLOCK_ANTI_LOOP][SafetyTripped] log line present. Then calls SYNC route_from_critique → asserts "finalize".</annotation>
+    <CrossLinks>
+      <Link TARGET="src_features_decision_maker_nodes_py_cove_critique_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_features_decision_maker_nodes_py_route_from_critique_FUNC" TYPE="TESTS" />
+    </CrossLinks>
+  </tests_test_anti_loop_py>
+
+  <tests_test_graph_compilation_py FILE="src/features/decision_maker/tests/test_graph_compilation.py" TYPE="TEST_MODULE">
+    <keywords>SyncTest; GraphCompile; MemorySaver; BaseCheckpointSaver; InterruptAfter; AC5; AC10</keywords>
+    <annotation>Compiles graph using memory_checkpointer fixture (MemorySaver — no SQLite DB file). Asserts all 7 node IDs reachable from START and that interrupt_after includes "3_Weight_Questioner". Checkpointer isinstance check relaxed to BaseCheckpointSaver so the same test covers both MemorySaver and AsyncSqliteSaver paths.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_features_decision_maker_graph_py_build_graph_FUNC" TYPE="TESTS" />
+    </CrossLinks>
+  </tests_test_graph_compilation_py>
+
+  <tests_test_json_utils_py FILE="src/features/decision_maker/tests/test_json_utils.py" TYPE="TEST_MODULE" VERSION="1.1.0">
+    <keywords>SyncTest; JsonParser; JsonParseError; RawSnippet; ReasoningPrefixCases; ParametrizedPositive; SnippetPreservation</keywords>
+    <annotation>EXTENDED in v1.1.0 (6 → 12 tests). Original v1.0.0 cases preserved: raw json, fenced ```json, bare ```, embedded prose, empty input → JsonParseError, malformed → JsonParseError.raw_snippet populated. NEW in v1.1.0 (regression coverage for Strategy 0 + raw_decode fallback): 5 parametrized positive cases — thinking_prefix_simple, thinking_prefix_uppercase, thinking_with_nested_braces, think_short_tag, reasoning_block_before_fenced_json; plus 1 standalone test_thinking_block_stripped_preserves_original_snippet_on_error asserting JsonParseError.raw_snippet reflects the ORIGINAL input (with &lt;thinking&gt; prefix intact) rather than the normalised text. All 12 pass under pytest-asyncio-free sync execution.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_core_json_utils_py_safe_json_parse_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_core_json_utils_py__strip_reasoning_blocks_FUNC" TYPE="TESTS_INDIRECTLY" />
+    </CrossLinks>
+  </tests_test_json_utils_py>
+
+  <tests_test_async_core_py FILE="src/features/decision_maker/tests/test_async_core.py" TYPE="TEST_MODULE">
+    <keywords>AsyncTest; PytestAsyncio; AsyncSqliteSaver; EventLoopBoundary; CheckpointRoundTrip; AC8; AC9; AC10</keywords>
+    <annotation>NEW in v2.0.0. Two @pytest.mark.asyncio tests: (1) test_async_start_session_reaches_interrupt — awaits start_session against AsyncSqliteSaver at tmp_path DB, asserts status="awaiting_user" and question non-empty; uses fake_llm for nodes 1..3. (2) test_async_resume_session_preserves_state — chains start+resume on SAME tmp_path DB with SAME thread_id, asserts final_answer non-empty AND terminal state contains weights/draft_analysis/final_answer (proves AsyncSqliteSaver checkpoint round-trip survives event-loop transitions).</annotation>
+    <CrossLinks>
+      <Link TARGET="src_features_decision_maker_graph_py_start_session_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_features_decision_maker_graph_py_resume_session_FUNC" TYPE="TESTS" />
+    </CrossLinks>
+  </tests_test_async_core_py>
+
+  <tests_test_llm_utils_py FILE="src/features/decision_maker/tests/test_llm_utils.py" TYPE="TEST_MODULE" VERSION="1.0.0">
+    <keywords>UnitTest; PytestAsyncio; LLMSanitization; Idempotent; LastOutputBlockPreference; IntegrationRegression; WeightQuestionerFix; FinalSynthesizerFix; CleanedLengthLogAssertion</keywords>
+    <annotation>NEW in v2.1.0 (Option D). 14 tests total across four groups:
+      (1) strip_reasoning_blocks unit (5): basic, uppercase, multi-tag, nested braces inside thinking, no-tags-unchanged.
+      (2) extract_output_payload unit (5): present, absent-returns-unchanged, multi-line Markdown payload, case-insensitive, MULTIPLE blocks returns-LAST.
+      (3) sanitize_llm_response unit (3): full pipeline grok-style, idempotent sanitize(sanitize(x)) == sanitize(x), empty/whitespace-only input.
+      (4) integration regressions (3, pytest-asyncio):
+        - test_weight_questioner_extracts_last_question_from_grok_style_response — proves the fix for bug #1 (last_question='' became 'Какие критерии важнее?').
+        - test_final_synthesizer_strips_reasoning_from_final_answer — proves the fix for bug #2 (final_answer contains Markdown header, 0 occurrences of &lt;thinking&gt; or &lt;output&gt;).
+        - test_invoke_llm_async_emits_cleaned_length_log — proves the new BLOCK_SANITIZE LDD log line is emitted with both raw_length and cleaned_length markers.
+    </annotation>
+    <CrossLinks>
+      <Link TARGET="src_core_llm_utils_py_strip_reasoning_blocks_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_core_llm_utils_py_extract_output_payload_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_core_llm_utils_py_sanitize_llm_response_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_features_decision_maker_nodes_py__invoke_llm_async_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_features_decision_maker_nodes_py_weight_questioner_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_features_decision_maker_nodes_py_final_synthesizer_FUNC" TYPE="TESTS" />
+    </CrossLinks>
+  </tests_test_llm_utils_py>
+
+  <tests_test_parallel_search_py FILE="src/features/decision_maker/tests/test_parallel_search.py" TYPE="TEST_MODULE">
+    <keywords>AsyncTest; PytestAsyncio; AsyncioGather; WallClockProof; PerQueryLDD; AC11; AC13</keywords>
+    <annotation>NEW in v2.0.0. @pytest.mark.asyncio tests proving concurrency. Constructs 3 queries; injects fake_search_async (DELAY=0.2s). Awaits tool_node(state, search_fn=fake_search_async); asserts wall-clock elapsed &lt; DELAY × N × 0.75 = 0.45s (sequential would be ≥0.6s). Second test asserts per-query IMP:7 PENDING and IMP:8 SUCCESS both present in caplog (exactly one pair per query — AC13 LDD parallel integrity).</annotation>
+    <CrossLinks>
+      <Link TARGET="src_features_decision_maker_nodes_py_tool_node_FUNC" TYPE="TESTS" />
+    </CrossLinks>
+  </tests_test_parallel_search_py>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: project artifacts                                          -->
+  <!-- ================================================================ -->
+
+  <requirements_txt FILE="requirements.txt" TYPE="DEPENDENCY_MANIFEST">
+    <keywords>Pins; WHYComments; AsyncDependencies; ReproducibleEnvironment</keywords>
+    <annotation>v2.0.0 pins. Preserves all v1 pins (langgraph==0.2.60, langgraph-checkpoint-sqlite==2.0.1, langchain-core==0.3.21, langchain-openai==0.2.10, pydantic==2.9.2, python-dotenv==1.0.1, pytest==8.3.3, langsmith==0.1.147). Adds async dependencies: aiosqlite==0.20.0 (AsyncSqliteSaver driver), tavily-python==0.5.0 (AsyncTavilyClient), pytest-asyncio==0.24.0 (@pytest.mark.asyncio runtime). Each new pin carries a WHY-comment per core-rules §3.</annotation>
+  </requirements_txt>
+
+  <env_example FILE=".env.example" TYPE="CONFIG_TEMPLATE">
+    <keywords>EnvVars; Tavily; OpenRouter; Placeholders</keywords>
+    <annotation>v2.0.0. Contains OPENROUTER_API_KEY, OPENROUTER_MODEL (default: x-ai/grok-4-fast), TAVILY_API_KEY placeholder, and commented-out LangSmith keys. TAVILY_API_KEY is consumed by tools.search_async at call-time; absence triggers stub_search_async fallback.</annotation>
+  </env_example>
+
+  <scripts_smoke_run_py FILE="scripts/smoke_run.py" TYPE="OPERATOR_TOOL_MODULE" VERSION="1.0.0">
+    <keywords>SmokeTest; EndToEnd; RealNetwork; OpenRouter; Tavily; AsyncIO; DotEnvLoader; TempCheckpoint; LDDTailDump; OperatorTool</keywords>
+    <annotation>NEW in v2.0.1 (created during post-QA real-network verification cycle). One-shot CLI runner for end-to-end smoke testing against REAL external services (OpenRouter LLM + Tavily search). Loads brainstorm/.env via python-dotenv BEFORE importing src.features.*; refuses to run on placeholder keys (ends-with "..." heuristic). Uses tempfile.mkdtemp() for an isolated per-run checkpoint DB — never pollutes production brainstorm/checkpoints.sqlite. Exercises await start_session → canned human weights reply → await resume_session, prints the returned dicts, and dumps the tail IMP:7-10 lines from decision_maker.log for operator inspection. NOT part of the pytest suite.</annotation>
+    <run_smoke_FUNC NAME="run_smoke" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>AsyncEntryPoint; RealLLM; RealTavily; CannedDilemma; CannedAnswer</keywords>
+      <annotation>async def run_smoke() -> None. Builds a realistic Russian-language financial dilemma, threads a fresh UUID-based thread_id, awaits start_session, feeds a canned weights answer (Безопасность 40% / гибкость 30% / доходность 20% / комфорт 10%) into resume_session, prints results.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_features_decision_maker_graph_py_start_session_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_features_decision_maker_graph_py_resume_session_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </run_smoke_FUNC>
+    <dump_ldd_tail_FUNC NAME="dump_ldd_tail" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>LDDFilter; IMP7Through10; FileRead; OperatorDiagnostics</keywords>
+      <annotation>def dump_ldd_tail(log_path: Path, tail_lines: int = 400) -> None. Reads the last N lines of decision_maker.log and prints only those containing [IMP:7] / [IMP:8] / [IMP:9] / [IMP:10] markers — surfaces per-query parallel evidence + BeliefState writes + Anti-Loop/ExceptionEnrichment lines for visual verification after a smoke run.</annotation>
+    </dump_ldd_tail_FUNC>
+  </scripts_smoke_run_py>
+
+  <scripts_run_brainstorm_ui_py FILE="scripts/run_brainstorm_ui.py" TYPE="OPERATOR_TOOL_MODULE" VERSION="1.0.0">
+    <keywords>GradioLauncher; OperatorTool; LazyImport; DotEnvLoader; EnvVarSanityCheck; InBrowser; LocalHostOnly; KeyboardInterruptGuard</keywords>
+    <annotation>NEW in v3.0.0. Operator entry-point for the Gradio UI. Mirrors scripts/smoke_run.py topology exactly: prepends project root to sys.path, loads .env BEFORE importing feature modules, validates required env vars (OPENROUTER_API_KEY, OPENROUTER_MODEL, TAVILY_API_KEY) with placeholder detection, lazy-imports gradio + src.ui.app.build_ui (so environment failures surface before heavy UI instantiation), invokes demo = build_ui(), demo.launch(server_name="127.0.0.1", inbrowser=True), wrapped in try/except KeyboardInterrupt for clean Ctrl-C shutdown. NOT part of the pytest suite.</annotation>
+    <main_FUNC NAME="main" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>EntryPoint; UILaunch; EnvValidation</keywords>
+      <annotation>`def main() -> None`. Executes the env-validation + lazy-import + launch sequence described above.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_ui_app_py_build_ui_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </main_FUNC>
+  </scripts_run_brainstorm_ui_py>
+
+  <!-- ================================================================ -->
+  <!-- TESTS: tests/ui (headless UI verification — NEW in v3.0.0)        -->
+  <!-- ================================================================ -->
+
+  <tests_ui_conftest_py FILE="tests/ui/conftest.py" TYPE="PYTEST_FIXTURE_MODULE">
+    <keywords>AntiLoopProtocol; SessionHooks; TestCounter; PytestAsyncioAuto; LddCapture; AC_UI_13</keywords>
+    <annotation>NEW in v3.0.0. Anti-Loop Protocol conftest per mode-code §Step 4: pytest_sessionstart / pytest_sessionfinish manage tests/ui/.test_counter.json (increments on failures, resets to 0 only on 100% pass). Configures pytest-asyncio mode="auto". Provides ldd_capture fixture that filters caplog records by `[IMP:7-10]` regex and prints them to stdout BEFORE asserts (Anti-Illusion — agent sees trajectory on failure). Checklist + reflection output activated on attempt >0.</annotation>
+  </tests_ui_conftest_py>
+
+  <tests_ui_test_presenter_py FILE="tests/ui/test_presenter.py" TYPE="PYTEST_MODULE">
+    <keywords>PureFunctionTest; TableDriven; 9UIEventKinds; AC_UI_10</keywords>
+    <annotation>NEW in v3.0.0. 9 table-driven tests — one per UIEvent kind. Each test asserts render(event, chat_history, state_snapshot) returns tuple of shape (list, dict, str) with expected delta semantics: session_started resets state, node_completed appends status, state_snapshot updates JSON, cove_rewrite appends assistant warning + sets red status, awaiting_user appends question, final_answer appends final markdown + sets green status, error sets red status + appends error message.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_ui_presenter_py_render_FUNC" TYPE="TESTS" />
+    </CrossLinks>
+  </tests_ui_test_presenter_py>
+
+  <tests_ui_test_state_streaming_py FILE="tests/ui/test_state_streaming.py" TYPE="PYTEST_MODULE">
+    <keywords>StreamFidelity; MockedAstream; ThreeUpdates; CoVeOrdering; AC_UI_07; AC_UI_08</keywords>
+    <annotation>NEW in v3.0.0. 4 tests. Core: test_three_updates_produce_three_uievents — monkeypatches stream_session with a fake async generator yielding 3 state-update chunks + awaiting_user terminator; collects `events = [ev async for ev in orchestrate_start("x","tid")]`; asserts `len([e for e in events if e["kind"]=="node_completed"]) == 3` AND `len(state_snapshot) == 3` AND final `awaiting_user`. Core: test_cove_rewrite_emits_dedicated_event — fake chunk for 5_CoVe_Critique with decision="rewrite" + critique_feedback → asserts cove_rewrite UIEvent is emitted BEFORE the corresponding node_completed in the stream ordering.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_ui_controllers_py_orchestrate_start_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_features_decision_maker_graph_py_stream_session_FUNC" TYPE="MOCKS" />
+    </CrossLinks>
+  </tests_ui_test_state_streaming_py>
+
+  <tests_ui_test_ui_handlers_py FILE="tests/ui/test_ui_handlers.py" TYPE="PYTEST_MODULE">
+    <keywords>HeadlessUI; HandlerGenerator; SixSlotTuple; ThreadIdContinuity; NoGradioLaunch; AC_UI_09; AC_UI_11; AC_UI_17</keywords>
+    <annotation>NEW in v3.0.0. 6 tests. Verifies on_submit is an async generator, yields 6-slot tuples matching the contract (chat, state_json, status, new_mode, thread_id, textbox_clear). test_on_submit_transitions_to_awaiting_user_answer — after awaiting_user UIEvent, final tuple contains new_mode="awaiting_user_answer" (AC_UI_09). test_on_submit_thread_id_continuity — thread_id passed in equals thread_id in final tuple (AC_UI_17). test_no_gradio_import_in_controllers_or_presenter — grep-style import check (AC_UI_11 enforcement). NEVER calls `.launch()`.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_ui_app_py_on_submit_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_ui_controllers_py_orchestrate_start_FUNC" TYPE="MOCKS" />
+    </CrossLinks>
+  </tests_ui_test_ui_handlers_py>
+
+  <decision_maker_log FILE="decision_maker.log" TYPE="RUNTIME_LOG">
+    <keywords>LDD; RuntimeLog; IMP7; IMP8; IMP9; IMP10; BlockAntiLoop; BlockExecuteSearches; PerQueryTelemetry</keywords>
+    <annotation>Runtime LDD log file. Produced by setup_ldd_logger FileHandler. After test run, contains IMP:9 BeliefState lines from cove_critique AND multiple IMP:7/IMP:8 pairs from tool_node with distinct query= values (AC20). IMP:10 BLOCK_ANTI_LOOP lines appear when Anti-Loop cap trips in test_anti_loop.</annotation>
+  </decision_maker_log>
+
+  <!-- ================================================================ -->
+  <!-- PROJECT CROSS-LINKS (flow overview)                               -->
+  <!-- ================================================================ -->
+
+  <ProjectCrossLinks TYPE="MODULE_INTERACTIONS_OVERVIEW">
+    <Link TARGET="src_features_decision_maker_graph_py" TYPE="ORCHESTRATES_FLOW" />
+    <Link TARGET="src_features_decision_maker_graph_py_start_session_FUNC" TYPE="EXTERNAL_ASYNC_ENTRYPOINT" />
+    <Link TARGET="src_features_decision_maker_graph_py_resume_session_FUNC" TYPE="EXTERNAL_ASYNC_ENTRYPOINT" />
+    <Link TARGET="src_features_decision_maker_nodes_py" TYPE="ENCAPSULATES_BUSINESS_LOGIC" />
+    <Link TARGET="src_features_decision_maker_tools_py" TYPE="PROVIDES_PLUGGABLE_SEARCH" />
+    <Link TARGET="src_features_decision_maker_state_py" TYPE="DEFINES_STATE_CONTRACT" />
+    <Link TARGET="src_features_decision_maker_prompts_py" TYPE="DEFINES_PROMPT_CONSTANTS" />
+    <Link TARGET="src_core_llm_client_py" TYPE="PROVIDES_LLM_FACTORY_WITH_REASONING_TOGGLE" />
+    <Link TARGET="src_features_decision_maker_nodes_py__NODE_REASONING_POLICY_CONST" TYPE="DEFINES_HYBRID_REASONING_POLICY" />
+    <Link TARGET="src_core_logger_py" TYPE="PROVIDES_LDD_TELEMETRY" />
+    <Link TARGET="src_core_json_utils_py" TYPE="PROVIDES_JSON_PARSER" />
+    <Link TARGET="src_core_llm_utils_py" TYPE="PROVIDES_LLM_RESPONSE_SANITIZATION" />
+    <Link TARGET="tests_conftest_py" TYPE="PROVIDES_TEST_FIXTURES" />
+    <Link TARGET="scripts_smoke_run_py" TYPE="PROVIDES_REAL_NETWORK_SMOKE_RUNNER" />
+    <Link TARGET="src_features_decision_maker_graph_py_stream_session_FUNC" TYPE="EXTERNAL_ASYNC_STREAM_ENTRYPOINT" />
+    <Link TARGET="src_features_decision_maker_graph_py_stream_resume_session_FUNC" TYPE="EXTERNAL_ASYNC_STREAM_ENTRYPOINT" />
+    <Link TARGET="src_ui_app_py" TYPE="PROVIDES_GRADIO_UI_COMPOSITION" />
+    <Link TARGET="src_ui_controllers_py" TYPE="PROVIDES_FRAMEWORK_AGNOSTIC_UI_CONTROLLERS" />
+    <Link TARGET="src_ui_presenter_py" TYPE="PROVIDES_PURE_UI_RENDERER" />
+    <Link TARGET="scripts_run_brainstorm_ui_py" TYPE="PROVIDES_GRADIO_LAUNCHER" />
+    <Link TARGET="tests_ui_test_state_streaming_py" TYPE="VERIFIES_STREAM_FIDELITY" />
+    <Link TARGET="tests_ui_test_ui_handlers_py" TYPE="VERIFIES_HEADLESS_UI" />
+    <Link TARGET="tests_ui_test_presenter_py" TYPE="VERIFIES_PRESENTER_PURITY" />
+  </ProjectCrossLinks>
+
+</KnowledgeGraph>
