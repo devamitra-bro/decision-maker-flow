@@ -166,4 +166,4 @@ These conventions exist to make the code **maintainable by autonomous LLM agents
 
 ## License
 
-Not yet specified. All rights reserved by the author pending license choice.
+[MIT](LICENSE) © 2026 devamitra.
