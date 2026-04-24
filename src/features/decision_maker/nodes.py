@@ -163,6 +163,37 @@ _NODE_REASONING_POLICY: dict[str, bool] = {
 }
 # END_BLOCK_REASONING_POLICY
 
+# START_BLOCK_LLM_OVERRIDE: [Module-level LLM client override for MCP server DI — §9.4 Slice B]
+# RATIONALE: graph.py's MCP server path passes an injected llm_client. Nodes already support
+# llm_factory DI per-invocation, but LangGraph compiled graphs do not pass extra kwargs to
+# nodes. The minimum-invasive pattern is a module-level override variable that graph.py
+# sets/clears around the graph invocation. Nodes' existing llm_factory branch is reused:
+# if _LLM_CLIENT_OVERRIDE is set, it is exposed as the default llm_factory.
+# INVARIANT: _LLM_CLIENT_OVERRIDE is None in all Gradio UI code paths (backward compat).
+#            Only MCP server code paths set it via set_llm_client_override().
+_LLM_CLIENT_OVERRIDE: Optional[Any] = None
+
+
+def set_llm_client_override(client: Optional[Any]) -> None:
+    """
+    Set (or clear) the module-level LLM client override consumed by all node functions
+    when the MCP server injects a Config-driven llm_client via graph.py.
+
+    This is an ADDITIVE-ONLY DI seam for the MCP server path. The Gradio UI path NEVER
+    calls this function — it remains on the default None path (build_llm() per node call).
+
+    Thread-safety note: This function writes a module-level global. It is safe in the
+    single-worker uvicorn deployment (--workers 1 hardlocked per §9.5 / I2). Multi-worker
+    or multi-threaded environments MUST NOT use this function — use per-node llm_factory
+    injection instead.
+
+    Args:
+        client: A ChatOpenAI (or compatible) instance to inject, or None to clear the override.
+    """
+    global _LLM_CLIENT_OVERRIDE  # noqa: PLW0603
+    _LLM_CLIENT_OVERRIDE = client
+# END_BLOCK_LLM_OVERRIDE
+
 
 # ---------------------------------------------------------------------------
 # Custom Exception
@@ -330,6 +361,8 @@ async def context_analyzer(
     # START_BLOCK_LLM_CALL: [Resolve LLM and invoke async]
     if llm_factory is not None:
         llm = llm_factory()
+    elif _LLM_CLIENT_OVERRIDE is not None:
+        llm = _LLM_CLIENT_OVERRIDE
     else:
         from src.core.llm_client import build_llm
         llm = build_llm(reasoning_enabled=_NODE_REASONING_POLICY["context_analyzer"])
@@ -495,6 +528,8 @@ async def weight_questioner(
     # START_BLOCK_LLM_CALL: [Resolve LLM and invoke async]
     if llm_factory is not None:
         llm = llm_factory()
+    elif _LLM_CLIENT_OVERRIDE is not None:
+        llm = _LLM_CLIENT_OVERRIDE
     else:
         from src.core.llm_client import build_llm
         llm = build_llm(reasoning_enabled=_NODE_REASONING_POLICY["weight_questioner"])
@@ -579,6 +614,8 @@ async def weight_parser(
     # START_BLOCK_LLM_CALL: [Resolve LLM and invoke async]
     if llm_factory is not None:
         llm = llm_factory()
+    elif _LLM_CLIENT_OVERRIDE is not None:
+        llm = _LLM_CLIENT_OVERRIDE
     else:
         from src.core.llm_client import build_llm
         llm = build_llm(reasoning_enabled=_NODE_REASONING_POLICY["weight_parser"])
@@ -666,6 +703,8 @@ async def draft_generator(
     # START_BLOCK_LLM_CALL: [Resolve LLM and invoke async]
     if llm_factory is not None:
         llm = llm_factory()
+    elif _LLM_CLIENT_OVERRIDE is not None:
+        llm = _LLM_CLIENT_OVERRIDE
     else:
         from src.core.llm_client import build_llm
         llm = build_llm(reasoning_enabled=_NODE_REASONING_POLICY["draft_generator"])
@@ -750,6 +789,8 @@ async def cove_critique(
     # START_BLOCK_LLM_CALL: [Resolve LLM and invoke async for CoVe audit]
     if llm_factory is not None:
         llm = llm_factory()
+    elif _LLM_CLIENT_OVERRIDE is not None:
+        llm = _LLM_CLIENT_OVERRIDE
     else:
         from src.core.llm_client import build_llm
         llm = build_llm(reasoning_enabled=_NODE_REASONING_POLICY["cove_critique"])
@@ -852,6 +893,8 @@ async def final_synthesizer(
     # START_BLOCK_LLM_CALL: [Resolve LLM and invoke async]
     if llm_factory is not None:
         llm = llm_factory()
+    elif _LLM_CLIENT_OVERRIDE is not None:
+        llm = _LLM_CLIENT_OVERRIDE
     else:
         from src.core.llm_client import build_llm
         llm = build_llm(reasoning_enabled=_NODE_REASONING_POLICY["final_synthesizer"])

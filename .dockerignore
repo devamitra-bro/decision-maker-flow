@@ -1,0 +1,86 @@
+# FILE: .dockerignore
+# VERSION: 1.0.0
+# PURPOSE: Exclude files and directories not needed in the Docker build context.
+#          Minimises image size, prevents secrets and dev artifacts from leaking
+#          into the build context, and speeds up docker build transfer times.
+# SCOPE: All stages of the Dockerfile multi-stage build.
+# CHANGE_SUMMARY:
+#   v1.0.0 - Initial creation as Slice D.
+
+# Python cache and bytecode
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Test infrastructure
+**/.pytest_cache
+**/.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Git metadata
+.git
+.gitignore
+.gitattributes
+
+# Virtual environments (both lesson-style and standard)
+.venv
+venv/
+venv_*/
+env/
+
+# Development planning documents (not needed at runtime)
+plans/
+
+# Test source (not needed in the image; reduces attack surface)
+tests/
+
+# Development scripts and helpers
+scripts/
+
+# Local sqlite checkpoint file (mounted as volume at /data in production)
+checkpoints.sqlite
+*.sqlite
+*.db
+
+# Log files (app logs to stdout only per I1)
+*.log
+decision_maker.log
+
+# Documentation files
+README.md
+LICENSE
+SECURITY.md
+BACKLOG.md
+
+# Environment files (secrets must NOT enter the build context)
+.env
+.env.example
+.env.*
+
+# Documentation and knowledge graph artifacts
+docs/
+AppGraph.xml
+
+# Kustomize and k8s manifests (operator-side only)
+k8s/
+
+# Avoid self-referential inclusions
+Dockerfile
+.dockerignore
+
+# macOS filesystem artifacts
+.DS_Store
+**/.DS_Store
+
+# Editor and IDE metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# CI/CD artifacts
+.github/
+.gitlab/

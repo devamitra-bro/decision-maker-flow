@@ -1,0 +1,64 @@
+# FILE: k8s/pvc.yaml
+# VERSION: 1.0.0
+# START_MODULE_CONTRACT:
+# PURPOSE: Standalone PersistentVolumeClaim for brainstorm-mcp sqlite data volume.
+#          EXPERIMENTAL / FALLBACK USE ONLY.
+#
+#          NOTE: When brainstorm-mcp is deployed as a StatefulSet (the default and
+#          recommended mode), this file is NOT used. The StatefulSet's
+#          volumeClaimTemplates in k8s/deployment.yaml automatically provisions
+#          a PVC named "data-brainstorm-mcp-0". This standalone PVC is provided
+#          as a reference / fallback for environments that deploy brainstorm as a
+#          plain Deployment (not StatefulSet) or for manual PV pre-provisioning.
+#
+#          WHEN TO USE THIS FILE:
+#          - Deployment-mode fallback: if migrating from StatefulSet to Deployment,
+#            apply this PVC first, then update deployment.yaml to reference it by name.
+#          - Pre-provisioning: some cluster admins pre-create PVCs before applying
+#            the workload. Use this file as a template.
+#          - Local kind/minikube: single-node clusters with default StorageClass may
+#            not support volumeClaimTemplates; this explicit PVC can work around that.
+#
+# SCOPE: Single PVC "brainstorm-mcp-data" in namespace "default".
+# KEYWORDS: [DOMAIN(8): Kubernetes; TECH(8): PVC; CONCEPT(7): StorageFallback]
+# LINKS_TO_SPECIFICATION: DevelopmentPlan_MCP.md §2.4 (Slice D scope).
+# END_MODULE_CONTRACT
+#
+# START_RATIONALE:
+# Q: Why keep this file if the StatefulSet handles PVCs automatically?
+# A: Defence-in-depth and migration path. Operators on clusters without dynamic
+#    provisioning, or those running in Deployment mode (e.g., during local dev without
+#    k8s StatefulSet support), need a declarative PVC manifest. Keeping it prevents
+#    manual YAML authoring under pressure during incidents.
+# Q: Why is accessMode ReadWriteOnce?
+# A: sqlite is a single-writer database. Multiple concurrent writers would corrupt the
+#    WAL. ReadWriteOnce enforces single-pod access at the storage layer, complementing
+#    the replicas=1 constraint in deployment.yaml.
+# END_RATIONALE
+#
+# START_CHANGE_SUMMARY:
+# LAST_CHANGE: [v1.0.0 - Initial creation as Slice D: standalone fallback PVC.]
+# END_CHANGE_SUMMARY
+---
+# EXPERIMENTAL: Standalone PVC for Deployment-mode fallback.
+# NOT applied by the default kustomization.yaml (which uses StatefulSet volumeClaimTemplates).
+# Apply manually if needed: kubectl apply -f k8s/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: brainstorm-mcp-data
+  namespace: default
+  labels:
+    app.kubernetes.io/name: brainstorm-mcp
+    app.kubernetes.io/component: sub-agent
+    app.kubernetes.io/part-of: crablink-mcp-gateway
+  annotations:
+    brainstorm.crablink/usage: "deployment-mode-fallback"
+    brainstorm.crablink/note: "Not used by StatefulSet mode (default). See file header."
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  # storageClassName: standard  # Uncomment and set to your cluster's StorageClass name

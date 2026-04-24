@@ -1,0 +1,75 @@
+# FILE: k8s/configmap.yaml
+# VERSION: 1.0.0
+# START_MODULE_CONTRACT:
+# PURPOSE: Kubernetes ConfigMap for non-secret brainstorm-mcp environment configuration.
+#          This is the AUTHORISED place for environment URLs (§6 #7 prohibits hardcoded
+#          CrabLink-specific URLs in Python code). Python reads these via pydantic-settings
+#          env var bindings in src/server/config.py.
+# SCOPE: All non-secret env vars consumed by Config (config.py pydantic-settings model).
+# INPUT: Applied to cluster via kustomization.yaml; mounted as envFrom in deployment.yaml.
+# OUTPUT: Environment variables injected into brainstorm-mcp container.
+# KEYWORDS: [DOMAIN(9): Kubernetes; TECH(9): ConfigMap; CONCEPT(9): EnvDrivenConfig;
+#            CONCEPT(8): URLConfiguration; PATTERN(8): TwelveFactorApp]
+# LINKS_TO_SPECIFICATION: DevelopmentPlan_MCP.md §2.4 (Slice D), §6 constraint #7,
+#   §9.6 (config keys), §4.4 (readyz LLM gateway URL).
+# END_MODULE_CONTRACT
+#
+# START_RATIONALE:
+# Q: Why put GATEWAY_LLM_PROXY_URL in ConfigMap rather than code?
+# A: §6 negative constraint #7 explicitly forbids hardcoding CrabLink-specific URLs
+#    in Python. All environment-specific URLs must live in ConfigMap / env vars so
+#    the same container image works across dev/staging/prod clusters without rebuild.
+# Q: Why is METRICS_PORT=0?
+# A: Prometheus metrics are served on the main HTTP port 8000 via /metrics endpoint
+#    (not a separate port). METRICS_PORT=0 signals "disabled as separate port".
+#    The /metrics route is registered in turn_api.py.
+# END_RATIONALE
+#
+# START_CHANGE_SUMMARY:
+# LAST_CHANGE: [v1.0.0 - Initial creation as Slice D: all config keys from §9.6.]
+# END_CHANGE_SUMMARY
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: brainstorm-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: brainstorm-mcp
+    app.kubernetes.io/component: sub-agent
+    app.kubernetes.io/part-of: crablink-mcp-gateway
+data:
+  # EXAMPLE: override per-cluster via kustomize overlay or Helm values.
+  # This value is cluster-specific (k8s internal DNS). Replace in each environment.
+  GATEWAY_LLM_PROXY_URL: "http://gateway-llm-proxy.default.svc.cluster.local:8080/v1"
+
+  # Checkpointer backend: "sqlite" (default, MVP) or "postgres" (EXPERIMENTAL).
+  # Do NOT switch to "postgres" without completing the Postgres readiness items in BACKLOG.md.
+  BRAINSTORM_CHECKPOINTER: "sqlite"
+
+  # Path inside the /data volume where the sqlite checkpoint file is stored.
+  # Must remain inside the /data volume mount (StatefulSet PVC).
+  BRAINSTORM_SQLITE_PATH: "/data/checkpoints.sqlite"
+
+  # Session TTL in seconds. Sessions idle longer than this are swept by the background Sweeper.
+  # Default: 1800s (30 minutes).
+  BRAINSTORM_SESSION_TTL_SEC: "1800"
+
+  # Maximum seconds to wait for a single LangGraph turn before returning 408.
+  BRAINSTORM_TURN_TIMEOUT_SEC: "120"
+
+  # Sweeper scan interval in seconds (how often the idle-session GC runs).
+  BRAINSTORM_SWEEP_INTERVAL_SEC: "60"
+
+  # Sessions untouched for this many seconds are eligible for sweeper deletion.
+  # Must be >= 5 * BRAINSTORM_TURN_TIMEOUT_SEC (enforced by Config model_validator).
+  BRAINSTORM_SWEEP_THRESHOLD_SECS: "600"
+
+  # LLM model identifier passed to ChatOpenAI via the gateway proxy.
+  BRAINSTORM_LLM_MODEL: "gpt-4o-mini"
+
+  # Log level for the Python logging framework (stdout only, per I1).
+  LOG_LEVEL: "INFO"
+
+  # Prometheus metrics separate port. 0 = disabled (metrics served on main port via /metrics).
+  METRICS_PORT: "0"

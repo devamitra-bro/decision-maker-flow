@@ -1,5 +1,5 @@
 # FILE: src/features/decision_maker/graph.py
-# VERSION: 3.0.0
+# VERSION: 3.1.0
 # START_MODULE_CONTRACT:
 # PURPOSE: LangGraph StateGraph assembly and public async session API for Decision Maker.
 # SCOPE: build_graph(checkpointer) — sync factory accepting pre-built checkpointer via DI.
@@ -47,13 +47,20 @@
 # END_RATIONALE
 #
 # START_CHANGE_SUMMARY:
-# LAST_CHANGE: v3.0.0 — additive streaming parallel API; stream_session and stream_resume_session
+# LAST_CHANGE: v3.1.0 — Slice B DI seams. All 4 public session functions gain additive kwargs:
+#              checkpointer: Optional[Any] = None — when not None, skips AsyncSqliteSaver CM
+#              and uses the injected saver directly (MCP server path).
+#              llm_client: Optional[Any] = None — when not None, calls
+#              nodes.set_llm_client_override(llm_client) before graph invocation and
+#              nodes.set_llm_client_override(None) after (MCP server path).
+#              When both are None, current Gradio UI behavior is FULLY PRESERVED.
+#              No changes to build_graph, node topology, or state schema.
+# PREV_CHANGE_SUMMARY: v3.0.0 — additive streaming parallel API; stream_session and stream_resume_session
 #              async-generator functions appended to expose astream(stream_mode="updates") for
 #              the Gradio UI layer. No changes to build_graph, start_session, resume_session.
-# PREV_CHANGE_SUMMARY: v2.0.0 — async migration + Tavily search adapter; build_graph now accepts
+# PREV_PREV_CHANGE_SUMMARY: v2.0.0 — async migration + Tavily search adapter; build_graph now accepts
 #              checkpointer via DI (no internal SqliteSaver); start_session and resume_session
 #              become async def using AsyncSqliteSaver; all sqlite3.connect refs removed.
-# PREV_CHANGE_SUMMARY: v1.0.0 - Initial implementation; StateGraph assembly + SqliteSaver + session API.
 # END_CHANGE_SUMMARY
 #
 # START_MODULE_MAP:
@@ -77,6 +84,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from src.core.logger import setup_ldd_logger
+import src.features.decision_maker.nodes as _nodes_module
 from src.features.decision_maker.nodes import (
     context_analyzer,
     cove_critique,
@@ -216,77 +224,126 @@ def build_graph(checkpointer: Any):
 # START_CONTRACT:
 # PURPOSE: Async public API. Seed graph state with user_input, invoke the graph (runs
 #          until interrupt), and return the calibration question to the async caller.
-#          Opens AsyncSqliteSaver per-call as an async context manager.
+#          Opens AsyncSqliteSaver per-call as an async context manager when checkpointer
+#          is None (Gradio UI path). When checkpointer is not None (MCP server path),
+#          skips the CM and uses the injected saver directly (no from_conn_string call).
 # INPUTS:
 # - Natural language decision problem from user => user_input: str
 # - Unique thread identifier for this session => thread_id: str
 # - Optional checkpoint path override (default: brainstorm/checkpoints.sqlite) => checkpoint_path: str | None
+# - Optional injected checkpointer (MCP server DI path; None = Gradio UI env-driven) => checkpointer: Optional[Any]
+# - Optional injected LLM client (MCP server DI path; None = env-driven build_llm per node) => llm_client: Optional[Any]
 # OUTPUTS:
 # - dict: {"status": "awaiting_user", "question": str, "thread_id": str}
 # SIDE_EFFECTS: Writes async checkpoint to SQLite; emits LDD log at IMP:6, IMP:9.
+#               When llm_client is not None: sets/clears nodes._LLM_CLIENT_OVERRIDE.
 # KEYWORDS: [PATTERN(9): SessionAPI; CONCEPT(8): HumanInTheLoop; TECH(7): AsyncLangGraphInvoke;
-#            TECH(9): AsyncSqliteSaver; CONCEPT(10): AsyncIO]
+#            TECH(9): AsyncSqliteSaver; CONCEPT(10): AsyncIO; PATTERN(9): DependencyInjection]
 # LINKS: [CALLS_FUNCTION(9): build_graph; USES_API(9): AsyncSqliteSaver.from_conn_string;
-#         USES_API(8): graph.ainvoke; USES_API(7): graph.aget_state]
-# COMPLEXITY_SCORE: 7
+#         USES_API(8): graph.ainvoke; USES_API(7): graph.aget_state;
+#         CALLS_FUNCTION(8): _nodes_module.set_llm_client_override]
+# COMPLEXITY_SCORE: 8
 # END_CONTRACT
 async def start_session(
     user_input: str,
     thread_id: str,
     checkpoint_path: Optional[str] = None,
+    checkpointer: Optional[Any] = None,
+    llm_client: Optional[Any] = None,
 ) -> dict:
     """
     Async entry point for a new Decision Maker session.
 
-    Opens AsyncSqliteSaver.from_conn_string(path) as an async context manager (per-call
-    pattern, Concept A). Inside the context: builds the graph via DI, seeds initial state
-    (user_input, empty tool_facts, rewrite_count=0), then awaits graph.ainvoke(). The graph
-    runs from START through Node 1 (and optionally Node 2) until it reaches the interrupt
-    after Node 3 (3_Weight_Questioner). At that point the graph suspends and this function
-    reads the checkpointed state via await graph.aget_state() to extract last_question.
+    Supports two execution paths:
+    1. Gradio UI path (checkpointer=None): Opens AsyncSqliteSaver.from_conn_string(path)
+       as an async context manager (per-call Concept A pattern — original behavior preserved).
+    2. MCP server path (checkpointer != None): Skips the AsyncSqliteSaver CM entirely
+       and uses the injected checkpointer directly. build_graph(checkpointer) is called
+       with the injected saver. AsyncSqliteSaver.from_conn_string is NOT called.
+
+    When llm_client is not None (MCP server path), nodes._LLM_CLIENT_OVERRIDE is set
+    before graph invocation and cleared after, enabling all node functions to pick up the
+    injected LLM without per-node kwarg threading.
 
     Returns a dict ready for the API layer with:
     - status: "awaiting_user" (always on successful first leg)
     - question: the calibration question from Node 3
     - thread_id: echoed back for correlation
-
-    The AsyncSqliteSaver context is closed on exit — the DB file persists for resume_session.
     """
 
-    # START_BLOCK_RESOLVE_PATH: [Determine checkpoint path]
+    # START_BLOCK_RESOLVE_PATH: [Determine checkpoint path — only used on Gradio UI path]
     path = str(checkpoint_path) if checkpoint_path else _DEFAULT_CHECKPOINT_PATH
 
     logger.info(
         f"[Flow][IMP:6][start_session][BLOCK_RESOLVE_PATH][Configure] "
-        f"Starting session. thread_id={thread_id!r} checkpoint_path={path} [START]"
+        f"Starting session. thread_id={thread_id!r} "
+        f"injected_checkpointer={checkpointer is not None} "
+        f"injected_llm_client={llm_client is not None} "
+        f"checkpoint_path={path} [START]"
     )
     # END_BLOCK_RESOLVE_PATH
 
-    # START_BLOCK_OPEN_CHECKPOINTER: [Open AsyncSqliteSaver as async context manager]
-    async with AsyncSqliteSaver.from_conn_string(path) as cp:
-        graph = build_graph(cp)
-        config = {"configurable": {"thread_id": thread_id}}
+    # START_BLOCK_LLM_OVERRIDE: [Set module-level LLM override if injected]
+    if llm_client is not None:
+        _nodes_module.set_llm_client_override(llm_client)
+    # END_BLOCK_LLM_OVERRIDE
 
-        # START_BLOCK_INVOKE: [Seed initial state and invoke graph]
-        initial_state = {
-            "user_input": user_input,
-            "tool_facts": [],
-            "rewrite_count": 0,
-        }
-        await graph.ainvoke(initial_state, config)
-        # END_BLOCK_INVOKE
+    try:
+        # START_BLOCK_CHECKPOINTER_DISPATCH: [Choose CM path vs direct path]
+        if checkpointer is not None:
+            # MCP server path: use injected checkpointer directly (no from_conn_string)
+            cp = checkpointer
+            graph_instance = build_graph(cp)
+            config = {"configurable": {"thread_id": thread_id}}
 
-        # START_BLOCK_READ_STATE: [Read checkpointed state to extract question]
-        snapshot = await graph.aget_state(config)
-        last_question = snapshot.values.get("last_question") or ""
+            initial_state = {
+                "user_input": user_input,
+                "tool_facts": [],
+                "rewrite_count": 0,
+            }
+            await graph_instance.ainvoke(initial_state, config)
 
-        logger.info(
-            f"[BeliefState][IMP:9][start_session][BLOCK_READ_STATE][BusinessLogic] "
-            f"Session started. thread_id={thread_id!r} "
-            f"last_question={last_question!r} [VALUE]"
-        )
-        # END_BLOCK_READ_STATE
-    # END_BLOCK_OPEN_CHECKPOINTER
+            snapshot = await graph_instance.aget_state(config)
+            last_question = snapshot.values.get("last_question") or ""
+
+            logger.info(
+                f"[BeliefState][IMP:9][start_session][BLOCK_CHECKPOINTER_DISPATCH][BusinessLogic] "
+                f"Session started (injected CP). thread_id={thread_id!r} "
+                f"last_question={last_question!r} [VALUE]"
+            )
+
+        else:
+            # Gradio UI path: open AsyncSqliteSaver as async context manager (Concept A)
+            async with AsyncSqliteSaver.from_conn_string(path) as cp:
+                graph_instance = build_graph(cp)
+                config = {"configurable": {"thread_id": thread_id}}
+
+                # START_BLOCK_INVOKE: [Seed initial state and invoke graph]
+                initial_state = {
+                    "user_input": user_input,
+                    "tool_facts": [],
+                    "rewrite_count": 0,
+                }
+                await graph_instance.ainvoke(initial_state, config)
+                # END_BLOCK_INVOKE
+
+                # START_BLOCK_READ_STATE: [Read checkpointed state to extract question]
+                snapshot = await graph_instance.aget_state(config)
+                last_question = snapshot.values.get("last_question") or ""
+
+                logger.info(
+                    f"[BeliefState][IMP:9][start_session][BLOCK_READ_STATE][BusinessLogic] "
+                    f"Session started. thread_id={thread_id!r} "
+                    f"last_question={last_question!r} [VALUE]"
+                )
+                # END_BLOCK_READ_STATE
+        # END_BLOCK_CHECKPOINTER_DISPATCH
+
+    finally:
+        # START_BLOCK_LLM_OVERRIDE_CLEAR: [Always clear LLM override to prevent leakage]
+        if llm_client is not None:
+            _nodes_module.set_llm_client_override(None)
+        # END_BLOCK_LLM_OVERRIDE_CLEAR
 
     return {
         "status": "awaiting_user",
@@ -300,33 +357,43 @@ async def start_session(
 # START_CONTRACT:
 # PURPOSE: Async public API. Resume an interrupted session by injecting the user's answer,
 #          continuing the graph to completion, and returning the final answer.
-#          Opens AsyncSqliteSaver per-call as an async context manager.
+#          When checkpointer is None (Gradio UI path): Opens AsyncSqliteSaver per-call as CM.
+#          When checkpointer is not None (MCP server path): uses injected saver directly.
 # INPUTS:
 # - Human-in-the-loop reply to the calibration question => user_answer: str
 # - Thread identifier matching the interrupted session => thread_id: str
 # - Optional checkpoint path override => checkpoint_path: str | None
+# - Optional injected checkpointer (MCP server DI) => checkpointer: Optional[Any]
+# - Optional injected LLM client (MCP server DI) => llm_client: Optional[Any]
 # OUTPUTS:
 # - dict: {"status": "done", "final_answer": str, "thread_id": str}
 # SIDE_EFFECTS: Updates async checkpoint in SQLite; emits LDD log at IMP:6, IMP:9.
+#               When llm_client is not None: sets/clears nodes._LLM_CLIENT_OVERRIDE.
 # KEYWORDS: [PATTERN(9): SessionAPI; CONCEPT(8): HumanInTheLoop; TECH(7): AsyncLangGraphUpdateState;
-#            TECH(9): AsyncSqliteSaver; CONCEPT(10): AsyncIO]
+#            TECH(9): AsyncSqliteSaver; CONCEPT(10): AsyncIO; PATTERN(9): DependencyInjection]
 # LINKS: [CALLS_FUNCTION(9): build_graph; USES_API(9): AsyncSqliteSaver.from_conn_string;
-#         USES_API(8): graph.aupdate_state; USES_API(8): graph.ainvoke; USES_API(7): graph.aget_state]
-# COMPLEXITY_SCORE: 7
+#         USES_API(8): graph.aupdate_state; USES_API(8): graph.ainvoke; USES_API(7): graph.aget_state;
+#         CALLS_FUNCTION(8): _nodes_module.set_llm_client_override]
+# COMPLEXITY_SCORE: 8
 # END_CONTRACT
 async def resume_session(
     user_answer: str,
     thread_id: str,
     checkpoint_path: Optional[str] = None,
+    checkpointer: Optional[Any] = None,
+    llm_client: Optional[Any] = None,
 ) -> dict:
     """
     Async entry point for resuming a Decision Maker session after the interrupt.
 
-    Opens AsyncSqliteSaver.from_conn_string(path) — SAME path as start_session — to reload
-    the checkpointed state keyed by thread_id. Inside the context: rebuilds the graph (stateless
-    factory), injects user_answer via await graph.aupdate_state(), then continues execution
-    via await graph.ainvoke(None, config). The graph runs through Node 3.5, Node 4, Node 5
-    (with possible rewrite loop), and Node 6 before reaching END.
+    Supports two execution paths (same split as start_session):
+    1. Gradio UI path (checkpointer=None): Opens AsyncSqliteSaver.from_conn_string(path)
+       as async CM — original Concept A behavior fully preserved.
+    2. MCP server path (checkpointer != None): Uses injected checkpointer directly.
+
+    Rebuilds the graph (stateless factory), injects user_answer via await graph.aupdate_state(),
+    then continues execution via await graph.ainvoke(None, config). The graph runs through Node 3.5,
+    Node 4, Node 5 (with possible rewrite loop), and Node 6 before reaching END.
 
     Returns a dict with:
     - status: "done" (always on successful completion)
@@ -334,39 +401,74 @@ async def resume_session(
     - thread_id: echoed back for correlation
     """
 
-    # START_BLOCK_RESOLVE_PATH: [Determine checkpoint path]
+    # START_BLOCK_RESOLVE_PATH: [Determine checkpoint path — only used on Gradio UI path]
     path = str(checkpoint_path) if checkpoint_path else _DEFAULT_CHECKPOINT_PATH
 
     logger.info(
         f"[Flow][IMP:6][resume_session][BLOCK_RESOLVE_PATH][Configure] "
-        f"Resuming session. thread_id={thread_id!r} checkpoint_path={path} [START]"
+        f"Resuming session. thread_id={thread_id!r} "
+        f"injected_checkpointer={checkpointer is not None} "
+        f"injected_llm_client={llm_client is not None} "
+        f"checkpoint_path={path} [START]"
     )
     # END_BLOCK_RESOLVE_PATH
 
-    # START_BLOCK_OPEN_CHECKPOINTER: [Open AsyncSqliteSaver to reload checkpointed state]
-    async with AsyncSqliteSaver.from_conn_string(path) as cp:
-        graph = build_graph(cp)
-        config = {"configurable": {"thread_id": thread_id}}
+    # START_BLOCK_LLM_OVERRIDE: [Set module-level LLM override if injected]
+    if llm_client is not None:
+        _nodes_module.set_llm_client_override(llm_client)
+    # END_BLOCK_LLM_OVERRIDE
 
-        # START_BLOCK_INJECT_ANSWER: [Inject user_answer into checkpointed state]
-        await graph.aupdate_state(config, {"user_answer": user_answer})
-        # END_BLOCK_INJECT_ANSWER
+    try:
+        # START_BLOCK_CHECKPOINTER_DISPATCH: [Choose CM path vs direct path]
+        if checkpointer is not None:
+            # MCP server path: use injected checkpointer directly
+            cp = checkpointer
+            graph_instance = build_graph(cp)
+            config = {"configurable": {"thread_id": thread_id}}
 
-        # START_BLOCK_INVOKE: [Continue graph from interrupted point]
-        await graph.ainvoke(None, config)
-        # END_BLOCK_INVOKE
+            await graph_instance.aupdate_state(config, {"user_answer": user_answer})
+            await graph_instance.ainvoke(None, config)
 
-        # START_BLOCK_READ_STATE: [Read terminal state for final_answer]
-        snapshot = await graph.aget_state(config)
-        final_answer = snapshot.values.get("final_answer") or ""
+            snapshot = await graph_instance.aget_state(config)
+            final_answer = snapshot.values.get("final_answer") or ""
 
-        logger.info(
-            f"[BeliefState][IMP:9][resume_session][BLOCK_READ_STATE][BusinessLogic] "
-            f"Session completed. thread_id={thread_id!r} "
-            f"final_answer_length={len(final_answer)} [VALUE]"
-        )
-        # END_BLOCK_READ_STATE
-    # END_BLOCK_OPEN_CHECKPOINTER
+            logger.info(
+                f"[BeliefState][IMP:9][resume_session][BLOCK_CHECKPOINTER_DISPATCH][BusinessLogic] "
+                f"Session completed (injected CP). thread_id={thread_id!r} "
+                f"final_answer_length={len(final_answer)} [VALUE]"
+            )
+
+        else:
+            # Gradio UI path: open AsyncSqliteSaver as async context manager (Concept A)
+            async with AsyncSqliteSaver.from_conn_string(path) as cp:
+                graph_instance = build_graph(cp)
+                config = {"configurable": {"thread_id": thread_id}}
+
+                # START_BLOCK_INJECT_ANSWER: [Inject user_answer into checkpointed state]
+                await graph_instance.aupdate_state(config, {"user_answer": user_answer})
+                # END_BLOCK_INJECT_ANSWER
+
+                # START_BLOCK_INVOKE: [Continue graph from interrupted point]
+                await graph_instance.ainvoke(None, config)
+                # END_BLOCK_INVOKE
+
+                # START_BLOCK_READ_STATE: [Read terminal state for final_answer]
+                snapshot = await graph_instance.aget_state(config)
+                final_answer = snapshot.values.get("final_answer") or ""
+
+                logger.info(
+                    f"[BeliefState][IMP:9][resume_session][BLOCK_READ_STATE][BusinessLogic] "
+                    f"Session completed. thread_id={thread_id!r} "
+                    f"final_answer_length={len(final_answer)} [VALUE]"
+                )
+                # END_BLOCK_READ_STATE
+        # END_BLOCK_CHECKPOINTER_DISPATCH
+
+    finally:
+        # START_BLOCK_LLM_OVERRIDE_CLEAR: [Always clear LLM override to prevent leakage]
+        if llm_client is not None:
+            _nodes_module.set_llm_client_override(None)
+        # END_BLOCK_LLM_OVERRIDE_CLEAR
 
     return {
         "status": "done",
@@ -379,7 +481,8 @@ async def resume_session(
 # START_FUNCTION_stream_session
 # START_CONTRACT:
 # PURPOSE: Async generator — streaming parallel public API for the UI layer.
-#          Opens AsyncSqliteSaver per-call, builds graph via DI, seeds initial state,
+#          Opens AsyncSqliteSaver per-call (Gradio UI path) or uses injected checkpointer
+#          directly (MCP server path). Builds graph via DI, seeds initial state,
 #          iterates graph.astream(initial_state, config, stream_mode="updates"),
 #          yields one raw chunk dict per node completion.
 #          After iteration completes (interrupt after 3_Weight_Questioner), reads
@@ -389,44 +492,45 @@ async def resume_session(
 # - Natural language decision problem from user => user_input: str
 # - Unique thread identifier for this session => thread_id: str
 # - Optional checkpoint path override (default: brainstorm/checkpoints.sqlite) => checkpoint_path: str | None
+# - Optional injected checkpointer (MCP server DI) => checkpointer: Optional[Any]
+# - Optional injected LLM client (MCP server DI) => llm_client: Optional[Any]
 # OUTPUTS:
 # - AsyncIterator[dict]: each item is either:
 #     {node_id: state_delta} (raw chunk from astream) — intermediate node events
 #     {"__awaiting_user__": True, "last_question": str, "thread_id": str} — final sentinel
 # SIDE_EFFECTS: Writes async checkpoint to SQLite; emits LDD log at IMP:6, IMP:9.
+#               When llm_client is not None: sets/clears nodes._LLM_CLIENT_OVERRIDE.
 # KEYWORDS: [PATTERN(10): AsyncGenerator; CONCEPT(10): StreamModeUpdates; TECH(9): AsyncSqliteSaver;
-#            PATTERN(8): ParallelPublicAPI; CONCEPT(8): HumanInTheLoop; CONCEPT(10): AsyncIO]
+#            PATTERN(8): ParallelPublicAPI; CONCEPT(8): HumanInTheLoop; CONCEPT(10): AsyncIO;
+#            PATTERN(9): DependencyInjection]
 # LINKS: [CALLS_FUNCTION(9): build_graph; USES_API(9): AsyncSqliteSaver.from_conn_string;
 #         USES_API(10): graph.astream; USES_API(8): graph.aget_state;
-#         CALLED_BY(10): ui_controllers_orchestrate_start_FUNC]
-# COMPLEXITY_SCORE: 8
+#         CALLED_BY(10): ui_controllers_orchestrate_start_FUNC;
+#         CALLS_FUNCTION(8): _nodes_module.set_llm_client_override]
+# COMPLEXITY_SCORE: 9
 # END_CONTRACT
 async def stream_session(
     user_input: str,
     thread_id: str,
     checkpoint_path: Optional[str] = None,
+    checkpointer: Optional[Any] = None,
+    llm_client: Optional[Any] = None,
 ):
     """
     Async generator providing a streaming parallel public API for the Decision Maker UI layer.
 
-    Opens AsyncSqliteSaver.from_conn_string(path) as an async context manager (per-call
-    Concept A pattern — identical to start_session). Inside the context: builds the graph
-    via DI, seeds initial state, then iterates graph.astream() with stream_mode="updates".
+    Supports two execution paths (same split as start_session):
+    1. Gradio UI path (checkpointer=None): Opens AsyncSqliteSaver.from_conn_string(path)
+       as async CM (Concept A pattern — original behavior fully preserved).
+    2. MCP server path (checkpointer != None): Uses injected checkpointer directly.
 
     Each iteration chunk from astream with stream_mode="updates" is a single-key dict
-    of the form {node_id: state_delta}. This raw chunk is yielded directly to the caller
-    (the UI controller), which is responsible for mapping chunk keys to UIEvent structures.
+    of the form {node_id: state_delta}. This raw chunk is yielded directly to the caller.
 
-    After the astream loop exits (the graph reaches the interrupt_after point after
-    3_Weight_Questioner), reads the current checkpoint state via aget_state to extract
-    last_question. Then yields a final sentinel dict:
+    After the astream loop exits, yields a final sentinel:
         {"__awaiting_user__": True, "last_question": last_question, "thread_id": thread_id}
 
-    The caller must treat any dict containing "__awaiting_user__": True as the end-of-stream
-    signal for the first leg (UC1_START_AND_AWAIT).
-
-    The AsyncSqliteSaver context is closed on generator return — the DB persists for
-    stream_resume_session.
+    The AsyncSqliteSaver context is closed on generator return (Gradio path only).
     """
 
     # START_BLOCK_RESOLVE_PATH: [Determine checkpoint path — same pattern as start_session]
@@ -434,103 +538,143 @@ async def stream_session(
 
     logger.info(
         f"[UIEvent][IMP:6][stream_session][BLOCK_RESOLVE_PATH][Configure] "
-        f"Starting streaming session. thread_id={thread_id!r} checkpoint_path={path} [START]"
+        f"Starting streaming session. thread_id={thread_id!r} "
+        f"injected_checkpointer={checkpointer is not None} "
+        f"checkpoint_path={path} [START]"
     )
     # END_BLOCK_RESOLVE_PATH
 
-    # START_BLOCK_OPEN_CHECKPOINTER: [Open AsyncSqliteSaver and stream astream updates]
-    async with AsyncSqliteSaver.from_conn_string(path) as cp:
-        graph = build_graph(cp)
-        config = {"configurable": {"thread_id": thread_id}}
+    # START_BLOCK_LLM_OVERRIDE: [Set module-level LLM override if injected]
+    if llm_client is not None:
+        _nodes_module.set_llm_client_override(llm_client)
+    # END_BLOCK_LLM_OVERRIDE
 
-        # START_BLOCK_SEED_STATE: [Build initial state for first leg]
-        initial_state = {
-            "user_input": user_input,
-            "tool_facts": [],
-            "rewrite_count": 0,
-        }
-        # END_BLOCK_SEED_STATE
+    try:
+        # START_BLOCK_CHECKPOINTER_DISPATCH: [Choose CM path vs direct path]
+        if checkpointer is not None:
+            # MCP server path: use injected checkpointer directly
+            cp = checkpointer
+            graph_instance = build_graph(cp)
+            config = {"configurable": {"thread_id": thread_id}}
+            initial_state = {
+                "user_input": user_input,
+                "tool_facts": [],
+                "rewrite_count": 0,
+            }
 
-        # START_BLOCK_STREAM_LOOP: [Iterate astream chunks — stream_mode="updates"]
-        logger.info(
-            f"[UIEvent][IMP:7][stream_session][BLOCK_STREAM_LOOP][IO] "
-            f"Starting astream iteration. thread_id={thread_id!r} stream_mode=updates [PENDING]"
-        )
-        async for chunk in graph.astream(initial_state, config, stream_mode="updates"):
-            yield chunk
-        # END_BLOCK_STREAM_LOOP
+            logger.info(
+                f"[UIEvent][IMP:7][stream_session][BLOCK_STREAM_LOOP][IO] "
+                f"Starting astream iteration (injected CP). thread_id={thread_id!r} [PENDING]"
+            )
+            async for chunk in graph_instance.astream(initial_state, config, stream_mode="updates"):
+                yield chunk
 
-        # START_BLOCK_AWAITING_USER: [Read final state and emit awaiting_user sentinel]
-        snapshot = await graph.aget_state(config)
-        last_question = snapshot.values.get("last_question") or ""
+            snapshot = await graph_instance.aget_state(config)
+            last_question = snapshot.values.get("last_question") or ""
 
-        logger.info(
-            f"[BeliefState][IMP:9][stream_session][BLOCK_AWAITING_USER][BusinessLogic] "
-            f"Stream leg-1 complete. thread_id={thread_id!r} "
-            f"last_question={last_question!r} Emitting awaiting_user sentinel. [SUCCESS]"
-        )
+            logger.info(
+                f"[BeliefState][IMP:9][stream_session][BLOCK_CHECKPOINTER_DISPATCH][BusinessLogic] "
+                f"Stream leg-1 complete (injected CP). thread_id={thread_id!r} "
+                f"last_question={last_question!r} Emitting awaiting_user sentinel. [SUCCESS]"
+            )
 
-        yield {
-            "__awaiting_user__": True,
-            "last_question": last_question,
-            "thread_id": thread_id,
-        }
-        # END_BLOCK_AWAITING_USER
-    # END_BLOCK_OPEN_CHECKPOINTER
+        else:
+            # Gradio UI path: open AsyncSqliteSaver as async context manager
+            async with AsyncSqliteSaver.from_conn_string(path) as cp:
+                graph_instance = build_graph(cp)
+                config = {"configurable": {"thread_id": thread_id}}
+
+                # START_BLOCK_SEED_STATE: [Build initial state for first leg]
+                initial_state = {
+                    "user_input": user_input,
+                    "tool_facts": [],
+                    "rewrite_count": 0,
+                }
+                # END_BLOCK_SEED_STATE
+
+                # START_BLOCK_STREAM_LOOP: [Iterate astream chunks — stream_mode="updates"]
+                logger.info(
+                    f"[UIEvent][IMP:7][stream_session][BLOCK_STREAM_LOOP][IO] "
+                    f"Starting astream iteration. thread_id={thread_id!r} stream_mode=updates [PENDING]"
+                )
+                async for chunk in graph_instance.astream(initial_state, config, stream_mode="updates"):
+                    yield chunk
+                # END_BLOCK_STREAM_LOOP
+
+                # START_BLOCK_AWAITING_USER: [Read final state and emit awaiting_user sentinel]
+                snapshot = await graph_instance.aget_state(config)
+                last_question = snapshot.values.get("last_question") or ""
+
+                logger.info(
+                    f"[BeliefState][IMP:9][stream_session][BLOCK_AWAITING_USER][BusinessLogic] "
+                    f"Stream leg-1 complete. thread_id={thread_id!r} "
+                    f"last_question={last_question!r} Emitting awaiting_user sentinel. [SUCCESS]"
+                )
+        # END_BLOCK_CHECKPOINTER_DISPATCH
+
+    finally:
+        # START_BLOCK_LLM_OVERRIDE_CLEAR: [Always clear LLM override]
+        if llm_client is not None:
+            _nodes_module.set_llm_client_override(None)
+        # END_BLOCK_LLM_OVERRIDE_CLEAR
+
+    yield {
+        "__awaiting_user__": True,
+        "last_question": last_question,
+        "thread_id": thread_id,
+    }
 # END_FUNCTION_stream_session
 
 
 # START_FUNCTION_stream_resume_session
 # START_CONTRACT:
 # PURPOSE: Async generator — streaming parallel public API for the UI layer, leg 2 (resume).
-#          Opens AsyncSqliteSaver per-call (same path as stream_session), rebuilds graph,
-#          injects user_answer via aupdate_state, iterates graph.astream(None, config,
-#          stream_mode="updates"), yields one raw chunk dict per node completion.
-#          After iteration completes (graph reaches END), reads aget_state and yields a
-#          final sentinel dict with kind="done" + final_answer text.
+#          Opens AsyncSqliteSaver per-call (Gradio UI path) or uses injected checkpointer
+#          directly (MCP server path). Rebuilds graph, injects user_answer via aupdate_state,
+#          iterates graph.astream(None, config, stream_mode="updates"), yields one raw chunk
+#          dict per node completion. After iteration completes (graph reaches END), reads
+#          aget_state and yields a final sentinel dict with kind="done" + final_answer text.
 # INPUTS:
 # - Human-in-the-loop reply to the calibration question => user_answer: str
 # - Thread identifier matching the interrupted session => thread_id: str
 # - Optional checkpoint path override => checkpoint_path: str | None
+# - Optional injected checkpointer (MCP server DI) => checkpointer: Optional[Any]
+# - Optional injected LLM client (MCP server DI) => llm_client: Optional[Any]
 # OUTPUTS:
 # - AsyncIterator[dict]: each item is either:
 #     {node_id: state_delta} (raw chunk from astream) — intermediate node events
 #     {"__done__": True, "final_answer": str, "thread_id": str} — final sentinel
 # SIDE_EFFECTS: Updates async checkpoint in SQLite; emits LDD log at IMP:6, IMP:9.
+#               When llm_client is not None: sets/clears nodes._LLM_CLIENT_OVERRIDE.
 # KEYWORDS: [PATTERN(10): AsyncGenerator; CONCEPT(10): StreamModeUpdates; TECH(9): AsyncSqliteSaver;
-#            PATTERN(8): ParallelPublicAPI; CONCEPT(8): HumanInTheLoop; CONCEPT(10): AsyncIO]
+#            PATTERN(8): ParallelPublicAPI; CONCEPT(8): HumanInTheLoop; CONCEPT(10): AsyncIO;
+#            PATTERN(9): DependencyInjection]
 # LINKS: [CALLS_FUNCTION(9): build_graph; USES_API(9): AsyncSqliteSaver.from_conn_string;
 #         USES_API(8): graph.aupdate_state; USES_API(10): graph.astream; USES_API(8): graph.aget_state;
-#         CALLED_BY(10): ui_controllers_orchestrate_resume_FUNC]
-# COMPLEXITY_SCORE: 8
+#         CALLED_BY(10): ui_controllers_orchestrate_resume_FUNC;
+#         CALLS_FUNCTION(8): _nodes_module.set_llm_client_override]
+# COMPLEXITY_SCORE: 9
 # END_CONTRACT
 async def stream_resume_session(
     user_answer: str,
     thread_id: str,
     checkpoint_path: Optional[str] = None,
+    checkpointer: Optional[Any] = None,
+    llm_client: Optional[Any] = None,
 ):
     """
     Async generator providing a streaming parallel public API for Decision Maker UI layer, leg 2.
 
-    Opens AsyncSqliteSaver.from_conn_string(path) — the SAME path as stream_session — to
-    reload the checkpointed state keyed by thread_id (Concept A per-call pattern, identical
-    to resume_session). Inside the context: rebuilds the graph (stateless factory), injects
-    user_answer via await graph.aupdate_state(), then iterates graph.astream(None, config,
-    stream_mode="updates").
+    Supports two execution paths (same split as stream_session):
+    1. Gradio UI path (checkpointer=None): Opens AsyncSqliteSaver.from_conn_string(path)
+       as async CM (Concept A per-call pattern, identical to resume_session).
+    2. MCP server path (checkpointer != None): Uses injected checkpointer directly.
 
     Each iteration chunk is a single-key dict {node_id: state_delta}, yielded directly to
-    the caller. The caller (orchestrate_resume in controllers.py) is responsible for
-    inspecting state_delta for CoVe-rewrite conditions and emitting the appropriate UIEvents.
-
-    After the astream loop exits (graph reaches END after 6_Final_Synthesizer), reads
-    the terminal checkpoint state via aget_state to extract final_answer. Then yields a
-    final sentinel dict:
+    the caller. After the astream loop exits, yields a final sentinel:
         {"__done__": True, "final_answer": final_answer, "thread_id": thread_id}
 
-    The caller must treat any dict containing "__done__": True as the end-of-stream signal
-    for the second leg (UC2_RESUME_TO_FINAL / UC3_COVE_REWRITE_VISIBLE).
-
-    The AsyncSqliteSaver context is closed on generator return.
+    The AsyncSqliteSaver context is closed on generator return (Gradio path only).
     """
 
     # START_BLOCK_RESOLVE_PATH: [Determine checkpoint path — same pattern as resume_session]
@@ -538,43 +682,82 @@ async def stream_resume_session(
 
     logger.info(
         f"[UIEvent][IMP:6][stream_resume_session][BLOCK_RESOLVE_PATH][Configure] "
-        f"Starting streaming resume. thread_id={thread_id!r} checkpoint_path={path} [START]"
+        f"Starting streaming resume. thread_id={thread_id!r} "
+        f"injected_checkpointer={checkpointer is not None} "
+        f"checkpoint_path={path} [START]"
     )
     # END_BLOCK_RESOLVE_PATH
 
-    # START_BLOCK_OPEN_CHECKPOINTER: [Open AsyncSqliteSaver, inject answer, stream astream updates]
-    async with AsyncSqliteSaver.from_conn_string(path) as cp:
-        graph = build_graph(cp)
-        config = {"configurable": {"thread_id": thread_id}}
+    # START_BLOCK_LLM_OVERRIDE: [Set module-level LLM override if injected]
+    if llm_client is not None:
+        _nodes_module.set_llm_client_override(llm_client)
+    # END_BLOCK_LLM_OVERRIDE
 
-        # START_BLOCK_INJECT_ANSWER: [Inject user_answer into checkpointed state]
-        await graph.aupdate_state(config, {"user_answer": user_answer})
-        logger.info(
-            f"[UIEvent][IMP:7][stream_resume_session][BLOCK_INJECT_ANSWER][IO] "
-            f"user_answer injected. thread_id={thread_id!r} [SUCCESS]"
-        )
-        # END_BLOCK_INJECT_ANSWER
+    try:
+        # START_BLOCK_CHECKPOINTER_DISPATCH: [Choose CM path vs direct path]
+        if checkpointer is not None:
+            # MCP server path: use injected checkpointer directly
+            cp = checkpointer
+            graph_instance = build_graph(cp)
+            config = {"configurable": {"thread_id": thread_id}}
 
-        # START_BLOCK_STREAM_LOOP: [Iterate astream chunks — stream_mode="updates"]
-        async for chunk in graph.astream(None, config, stream_mode="updates"):
-            yield chunk
-        # END_BLOCK_STREAM_LOOP
+            await graph_instance.aupdate_state(config, {"user_answer": user_answer})
+            logger.info(
+                f"[UIEvent][IMP:7][stream_resume_session][BLOCK_INJECT_ANSWER][IO] "
+                f"user_answer injected (injected CP). thread_id={thread_id!r} [SUCCESS]"
+            )
 
-        # START_BLOCK_FINAL_ANSWER: [Read terminal state and emit done sentinel]
-        snapshot = await graph.aget_state(config)
-        final_answer = snapshot.values.get("final_answer") or ""
+            async for chunk in graph_instance.astream(None, config, stream_mode="updates"):
+                yield chunk
 
-        logger.info(
-            f"[BeliefState][IMP:9][stream_resume_session][BLOCK_FINAL_ANSWER][BusinessLogic] "
-            f"Stream leg-2 complete. thread_id={thread_id!r} "
-            f"final_answer_length={len(final_answer)} Emitting done sentinel. [SUCCESS]"
-        )
+            snapshot = await graph_instance.aget_state(config)
+            final_answer = snapshot.values.get("final_answer") or ""
 
-        yield {
-            "__done__": True,
-            "final_answer": final_answer,
-            "thread_id": thread_id,
-        }
-        # END_BLOCK_FINAL_ANSWER
-    # END_BLOCK_OPEN_CHECKPOINTER
+            logger.info(
+                f"[BeliefState][IMP:9][stream_resume_session][BLOCK_CHECKPOINTER_DISPATCH][BusinessLogic] "
+                f"Stream leg-2 complete (injected CP). thread_id={thread_id!r} "
+                f"final_answer_length={len(final_answer)} Emitting done sentinel. [SUCCESS]"
+            )
+
+        else:
+            # Gradio UI path: open AsyncSqliteSaver as async context manager (Concept A)
+            async with AsyncSqliteSaver.from_conn_string(path) as cp:
+                graph_instance = build_graph(cp)
+                config = {"configurable": {"thread_id": thread_id}}
+
+                # START_BLOCK_INJECT_ANSWER: [Inject user_answer into checkpointed state]
+                await graph_instance.aupdate_state(config, {"user_answer": user_answer})
+                logger.info(
+                    f"[UIEvent][IMP:7][stream_resume_session][BLOCK_INJECT_ANSWER][IO] "
+                    f"user_answer injected. thread_id={thread_id!r} [SUCCESS]"
+                )
+                # END_BLOCK_INJECT_ANSWER
+
+                # START_BLOCK_STREAM_LOOP: [Iterate astream chunks — stream_mode="updates"]
+                async for chunk in graph_instance.astream(None, config, stream_mode="updates"):
+                    yield chunk
+                # END_BLOCK_STREAM_LOOP
+
+                # START_BLOCK_FINAL_ANSWER: [Read terminal state and emit done sentinel]
+                snapshot = await graph_instance.aget_state(config)
+                final_answer = snapshot.values.get("final_answer") or ""
+
+                logger.info(
+                    f"[BeliefState][IMP:9][stream_resume_session][BLOCK_FINAL_ANSWER][BusinessLogic] "
+                    f"Stream leg-2 complete. thread_id={thread_id!r} "
+                    f"final_answer_length={len(final_answer)} Emitting done sentinel. [SUCCESS]"
+                )
+        # END_BLOCK_CHECKPOINTER_DISPATCH
+
+    finally:
+        # START_BLOCK_LLM_OVERRIDE_CLEAR: [Always clear LLM override]
+        if llm_client is not None:
+            _nodes_module.set_llm_client_override(None)
+        # END_BLOCK_LLM_OVERRIDE_CLEAR
+
+    yield {
+        "__done__": True,
+        "final_answer": final_answer,
+        "thread_id": thread_id,
+    }
 # END_FUNCTION_stream_resume_session

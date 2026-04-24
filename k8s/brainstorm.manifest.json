@@ -1,0 +1,139 @@
+{
+  "_meta": {
+    "file": "k8s/brainstorm.manifest.json",
+    "version": "0.1.0",
+    "purpose": "Operator-submitted manifest for brainstorm MCP sub-agent registration at the gateway /manifests/brainstorm endpoint. This file is NEVER read or sent by the brainstorm service itself — it is an operator artefact (plan §6 #12). Submit via: curl -X POST <gateway>/manifests/brainstorm -d @k8s/brainstorm.manifest.json",
+    "scope": "Gateway operator registration reference. Describes capabilities, auth, schemas, limits, observability, and deployment invariants.",
+    "keywords": ["MCP_manifest", "JSON_schema_draft_07", "ZeroKnowledgeDomain", "HMAC_SHA256", "StatefulService"],
+    "links_to_specification": "DevelopmentPlan_MCP.md §1 (Architectural Decisions), §2.4 (Slice D scope), §1.1 (TokenClaims R4), §1.4 (BusIntegration C1)",
+    "change_summary": "v0.1.0 - Initial creation as Slice D. 2 capabilities: brainstorm__turn, brainstorm__done."
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "name": "brainstorm",
+  "version": "0.1.0",
+  "description": "Stateful brainstorm sub-agent — LangGraph-driven decision-maker with human-in-the-loop calibration. Exposes POST /turn (advance session) and POST /done (close session idempotently). Session state persisted in sqlite (MVP) with WAL for crash safety.",
+  "endpoint": {
+    "base_url": "http://brainstorm-mcp.default.svc.cluster.local:8000",
+    "health": "/healthz",
+    "ready": "/readyz",
+    "metrics": "/metrics"
+  },
+  "auth": {
+    "scheme": "bearer",
+    "token_version": "v1",
+    "hmac_alg": "HMAC-SHA256",
+    "required_service_id": "brainstorm",
+    "zero_knowledge_claims": true,
+    "$comment_auth": "Token wire-format: v1.<b64url(payload)>.<b64url(hmac_sha256(payload,secret))>. Payload claims: {service_id, session_id, exp}. Identity fields are DROPPED immediately after JSON parse (R4 zero-knowledge). Operation granularity enforced by URL path only (/turn vs /done). See DevelopmentPlan_MCP.md §1.1."
+  },
+  "capabilities": [
+    {
+      "id": "brainstorm__turn",
+      "method": "POST",
+      "path": "/turn",
+      "description": "Advance a brainstorm session one turn (new or existing). If session_id is null, a new session is created. If session_id is provided, the existing checkpoint is loaded and the graph resumes.",
+      "request_schema_ref": "#/schemas/TurnRequest",
+      "response_schema_ref": "#/schemas/TurnResponse"
+    },
+    {
+      "id": "brainstorm__done",
+      "method": "POST",
+      "path": "/done",
+      "description": "Close a brainstorm session idempotently. Deletes the checkpoint. Returns acknowledged=true regardless of whether the session existed (idempotent DELETE semantics).",
+      "request_schema_ref": "#/schemas/DoneRequest",
+      "response_schema_ref": "#/schemas/DoneResponse"
+    }
+  ],
+  "schemas": {
+    "TurnRequest": {
+      "type": "object",
+      "required": ["message"],
+      "properties": {
+        "session_id": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{32}$",
+          "description": "Existing session UUID-v4 hex (32 hex chars). Null or omitted to start a new session."
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "description": "User turn message text (1-4000 chars)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "TurnResponse": {
+      "type": "object",
+      "required": ["session_id", "reply", "state", "metadata"],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Session identifier (hex string). Use in subsequent /turn calls."
+        },
+        "reply": {
+          "type": "string",
+          "description": "Brainstorm agent reply text for this turn."
+        },
+        "state": {
+          "type": "string",
+          "enum": ["running", "done"],
+          "description": "Session terminal state: 'running' if more turns are expected; 'done' if the session has concluded."
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Turn metadata (turn_number, tokens_estimate, duration_ms, etc.)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "DoneRequest": {
+      "type": "object",
+      "required": ["session_id"],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Session identifier to close."
+        }
+      },
+      "additionalProperties": false
+    },
+    "DoneResponse": {
+      "type": "object",
+      "required": ["acknowledged"],
+      "properties": {
+        "acknowledged": {
+          "type": "boolean",
+          "description": "Always true — /done is idempotent and always returns acknowledged=true."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "limits": {
+    "max_concurrent_sessions": 200,
+    "session_ttl_sec": 1800,
+    "turn_timeout_sec": 120
+  },
+  "observability": {
+    "metrics_path": "/metrics",
+    "metric_names": [
+      "brainstorm_turns_total",
+      "brainstorm_turn_duration_seconds",
+      "brainstorm_llm_roundtrip_seconds",
+      "brainstorm_active_sessions",
+      "brainstorm_done_total",
+      "brainstorm_token_verify_failures_total",
+      "brainstorm_idempotent_hits_total",
+      "brainstorm_sweeper_runs_total",
+      "brainstorm_sweeper_deleted_total",
+      "brainstorm_readyz_checks_total"
+    ]
+  },
+  "deployment": {
+    "replicas_hardlock": 1,
+    "workers_hardlock": 1,
+    "stateful": true,
+    "rationale": "sqlite single-writer + LangGraph in-memory state require single-pod single-worker. Scale-out requires Postgres checkpointer migration (see BACKLOG.md)."
+  }
+}

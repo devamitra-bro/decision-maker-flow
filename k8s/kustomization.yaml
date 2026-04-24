@@ -1,0 +1,34 @@
+# FILE: k8s/kustomization.yaml
+# VERSION: 1.0.0
+# START_MODULE_CONTRACT:
+# PURPOSE: Kustomize base configuration for brainstorm-mcp k8s manifests.
+#          Defines the resource list and common labels applied to all objects.
+#          Apply via: kubectl apply -k k8s/
+#          Dry-run verification: kubectl apply --dry-run=client -k k8s/
+# SCOPE: Base layer; overlays (dev/staging/prod) would extend this via kustomize
+#        overlay directories with environment-specific patches.
+# KEYWORDS: [DOMAIN(9): Kubernetes; TECH(9): Kustomize; CONCEPT(8): GitOps]
+# LINKS_TO_SPECIFICATION: DevelopmentPlan_MCP.md §2.4 (Slice D exit criteria).
+# END_MODULE_CONTRACT
+#
+# NOTE: pvc.yaml is intentionally excluded from this kustomization.
+# The StatefulSet in deployment.yaml uses volumeClaimTemplates which auto-creates
+# the PVC. Applying pvc.yaml via kustomize would create an orphaned second PVC.
+# pvc.yaml is a standalone fallback for Deployment-mode only (see its header).
+#
+# START_CHANGE_SUMMARY:
+# LAST_CHANGE: [v1.0.0 - Initial creation as Slice D.]
+# END_CHANGE_SUMMARY
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- configmap.yaml
+- secret.example.yaml
+- deployment.yaml
+- service.yaml
+
+commonLabels:
+  app.kubernetes.io/name: brainstorm-mcp
+  app.kubernetes.io/part-of: crablink-mcp-gateway

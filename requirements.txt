@@ -4,7 +4,7 @@ langgraph==0.2.60
 langgraph-checkpoint-sqlite==2.0.1   # ships AsyncSqliteSaver via langgraph.checkpoint.sqlite.aio
 
 # LangChain primitives (criterion: Protocol Compliance — base Message/RunnableConfig types)
-langchain-core==0.3.21
+langchain-core==0.3.63               # v4.0.0 fix: 0.3.21 excluded by langgraph 0.2.60; updated to installed version
 
 # OpenRouter via OpenAI-compatible endpoint (criterion: VFS Isolation — no extra integrations)
 langchain-openai==0.2.10             # ChatOpenAI.ainvoke() supported since 0.2.x; supports base_url="https://openrouter.ai/api/v1"
@@ -28,3 +28,15 @@ pytest-asyncio==0.24.0               # @pytest.mark.asyncio + event_loop fixture
 
 # === v3.0.0 additions ===
 gradio==5.9.1                        # Agentic UX streaming UI layer (src/ui/); ChatMessage-format Chatbot; WHY: task spec P1 + DevelopmentPlan_UI.md §1
+
+# === v4.0.0 additions (MCP integration) ===
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+httpx==0.27.2
+prometheus-client==0.21.0
+pydantic-settings==2.6.1
+cachetools==5.5.0                    # TTLCache for Idempotency-Key header (Slice C, §9.1)
+langgraph-checkpoint-postgres==2.0.2 # EXPERIMENTAL
+# test-only
+pytest-httpx==0.33.0
+freezegun==1.5.1

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   FILE: AppGraph.xml
-  VERSION: 3.0.0
+  VERSION: 4.0.0
   SCOPE: /Users/a1111/Dev/CrabLink/flows/brainstorm (local knowledge graph; does NOT extend any root-level graph in the framework host)
   GENERATED_BY: mode-architect (Claude Code port, KiloCode v3.1) — post-QA finalization + post-debug parser immunization + centralised LLM-response sanitization (Option D) + Hybrid Reasoning Routing (T3) + UI layer (v3.0.0 — Gradio Agentic UX)
   GENERATED_AT: 2026-04-21
@@ -682,6 +682,254 @@
     <Link TARGET="tests_ui_test_state_streaming_py" TYPE="VERIFIES_STREAM_FIDELITY" />
     <Link TARGET="tests_ui_test_ui_handlers_py" TYPE="VERIFIES_HEADLESS_UI" />
     <Link TARGET="tests_ui_test_presenter_py" TYPE="VERIFIES_PRESENTER_PURITY" />
+    <Link TARGET="src_server_config_py" TYPE="PROVIDES_MCP_SERVER_CONFIG" />
+    <Link TARGET="src_server_auth_py" TYPE="PROVIDES_HMAC_AUTH_LAYER" />
+    <Link TARGET="src_server_app_factory_py" TYPE="PROVIDES_FASTAPI_APP_FACTORY" />
+    <Link TARGET="k8s_deployment_section" TYPE="DEFINES_K8S_DEPLOYMENT" />
   </ProjectCrossLinks>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: src/server/ — MCP HTTP API (Slices A–E, v4.0.0 addition)  -->
+  <!-- ================================================================ -->
+
+  <src_server_config_py FILE="src/server/config.py" TYPE="CONFIG_MODULE" VERSION="1.0.0">
+    <keywords>pydantic-settings; SecretStr; EnvDriven; FailFast; SweepThresholdValidator; MCP_Integration</keywords>
+    <annotation>Pydantic-settings configuration for the brainstorm MCP HTTP server. Single source of truth for all runtime parameters. Required fields (BRAINSTORM_HMAC_SECRET, GATEWAY_LLM_PROXY_URL, GATEWAY_LLM_API_KEY) raise ValidationError at startup on absence — fail-fast before any socket opens. SecretStr prevents accidental secret logging. model_validator enforces sweep_threshold_secs >= 5 * turn_timeout_sec (§9.4 race safety). All downstream modules receive a typed Config instance via get_cfg() Depends provider — never raw os.environ access.</annotation>
+    <Config_CLASS NAME="Config" TYPE="IS_CLASS_OF_MODULE">
+      <keywords>BaseSettings; SecretStr; Literal; FieldAlias; SweepRaceInvariant</keywords>
+      <annotation>Frozen configuration snapshot. Fields: hmac_secret (BRAINSTORM_HMAC_SECRET), gateway_llm_api_key (GATEWAY_LLM_API_KEY), gateway_llm_proxy_url (GATEWAY_LLM_PROXY_URL), checkpointer_kind (sqlite|postgres), sqlite_path, checkpoint_dsn, session_ttl_sec, turn_timeout_sec, sweep_interval_sec, sweep_threshold_secs, llm_model, gradio_ui, log_level, metrics_port.</annotation>
+    </Config_CLASS>
+    <get_cfg_FUNC NAME="get_cfg" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>lru_cache; Singleton; DependsProvider</keywords>
+      <annotation>FastAPI Depends-compatible provider. lru_cache(maxsize=1) ensures env parsing runs exactly once per process. Logs IMP:9 belief-state on first call. Tests use dependency_overrides or get_cfg.cache_clear().</annotation>
+      <CrossLinks>
+        <Link TARGET="src_server_auth_py_require_service_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_server_checkpoint_factory_py_build_checkpointer_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_server_app_factory_py_create_app_FUNC" TYPE="IS_USED_BY" />
+      </CrossLinks>
+    </get_cfg_FUNC>
+  </src_server_config_py>
+
+  <src_server_auth_py FILE="src/server/auth.py" TYPE="AUTH_MODULE" VERSION="1.1.0">
+    <keywords>HMAC_SHA256; base64url; ConstantTimeCompare; ZeroKnowledgeClaims; PadRepair; GoWireCompat; TokenMint; R4_ZeroKnowledge; I5_ThreeFieldShape; I6_PopPII; I7_ConstantTime; I8_PadRepair</keywords>
+    <annotation>Python port of crablink-gateway/kernel/sessiontoken/token.go v1.0.0 verifier with R4 zero-knowledge payload interpretation. Provides verify_session_token (full HMAC pipeline), mint_session_token (v1.1.0 addition — inverse for dev tooling), require_service FastAPI Depends factory, and _b64url_encode/_b64url_decode base64url primitives. I5: TokenClaims has exactly {service_id, session_id, exp}. I6: user_id and iat are popped immediately after json.loads. I7: hmac.compare_digest for constant-time comparison. I8: pad-repair for Go RawURLEncoding compatibility.</annotation>
+    <TokenClaims_CLASS NAME="TokenClaims" TYPE="IS_DATACLASS_OF_MODULE">
+      <keywords>FrozenDataclass; ZeroKnowledgeClaims; I5_Invariant; ThreeFields</keywords>
+      <annotation>@dataclass(frozen=True) with exactly {service_id, session_id, exp}. Never contains user_id or iat — R4 zero-knowledge structural invariant enforced by test_token_claims_strict_shape.</annotation>
+    </TokenClaims_CLASS>
+    <AuthError_CLASS NAME="AuthError" TYPE="IS_EXCEPTION_OF_MODULE">
+      <keywords>TypedExceptionWithReason; MetricLabel; AuthErrorTaxonomy</keywords>
+      <annotation>Exception carrying .reason in {malformed, bad_version, bad_signature, expired, wrong_service, missing_session}. Used by Prometheus metric label brainstorm_token_verify_failures_total{reason=...}.</annotation>
+    </AuthError_CLASS>
+    <verify_session_token_FUNC NAME="verify_session_token" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>BearerParse; SplitDot; Base64urlDecode; HMAC_Verify; JSONParse; PopPII; ServiceValidate; UUIDv4Check; ExpiryCheck; IMP9_BeliefState</keywords>
+      <annotation>12-step pipeline: Bearer-strip → split(.) → version v1 → base64url-decode(pad-repair) → HMAC-SHA256 compare_digest → json.loads → pop user_id/iat → assert absent → construct TokenClaims → validate service_id/session_id/exp. Logs IMP:9 on both failure and success (AI Belief State).</annotation>
+      <CrossLinks>
+        <Link TARGET="src_server_auth_py_TokenClaims_CLASS" TYPE="CONSTRUCTS_RESULT" />
+        <Link TARGET="src_server_metrics_py_build_registry_FUNC" TYPE="INCREMENTS_METRIC" />
+        <Link TARGET="src_server_auth_py_require_service_FUNC" TYPE="IS_CALLED_BY" />
+      </CrossLinks>
+    </verify_session_token_FUNC>
+    <mint_session_token_FUNC NAME="mint_session_token" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>DevHelper; TokenMint; GoWireCompat; InverseOfVerify; SortedKeys; CompactJSON</keywords>
+      <annotation>v1.1.0 addition (Slice E). Inverse of verify_session_token: builds payload JSON (sorted keys, compact), computes HMAC-SHA256, base64url-encodes both, returns "v1.{payload}.{sig}". Used ONLY by scripts/mint_token.py and tests/smoke/test_mint_roundtrip.py. NOT for production request handling.</annotation>
+      <CrossLinks>
+        <Link TARGET="scripts_mint_token_py" TYPE="IS_USED_BY" />
+        <Link TARGET="tests_smoke_test_mint_roundtrip_py" TYPE="IS_TESTED_BY" />
+      </CrossLinks>
+    </mint_session_token_FUNC>
+    <require_service_FUNC NAME="require_service" TYPE="IS_DEP_FACTORY_OF_MODULE">
+      <keywords>FastAPI_Depends; StableIdentityCache; DEPS_CACHE; DependencyOverrides</keywords>
+      <annotation>Factory returning stable closures from _DEPS_CACHE. Uses setdefault to guarantee identity equality for FastAPI dependency_overrides in tests. Inner closure reads Authorization header via Header(None, alias="Authorization"), calls verify_session_token, translates AuthError to HTTPException(401|403).</annotation>
+      <CrossLinks>
+        <Link TARGET="src_server_auth_py_verify_session_token_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_server_turn_api_py_handle_turn_FUNC" TYPE="IS_DEPENDS_OF" />
+        <Link TARGET="src_server_turn_api_py_handle_done_FUNC" TYPE="IS_DEPENDS_OF" />
+      </CrossLinks>
+    </require_service_FUNC>
+  </src_server_auth_py>
+
+  <src_server_checkpoint_factory_py FILE="src/server/checkpoint_factory.py" TYPE="FACTORY_MODULE" VERSION="1.0.0">
+    <keywords>LangGraph; SqliteSaver; PostgresSaver; FactoryPattern; WAL; setup; ConfigError; TouchMetadata</keywords>
+    <annotation>Pure factory returning a BaseCheckpointSaver. build_checkpointer switches on cfg.checkpointer_kind: sqlite (AsyncSqliteSaver, WAL-enabled via PRAGMA journal_mode=WAL at setup) or postgres (EXPERIMENTAL). Unknown kind raises ConfigError. lifespan calls saver.setup() for schema migration. Also provides get_checkpointer FastAPI Depends returning app.state.checkpointer. Touch-based metadata (_brainstorm_meta table) records last_touched per thread_id for sweeper race safety (§9.4).</annotation>
+    <build_checkpointer_FUNC NAME="build_checkpointer" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>SqliteSaver; PostgresSaver; WAL; setup; ConfigError; FactorySwitch</keywords>
+      <annotation>Switches on cfg.checkpointer_kind. Calls saver.setup() once for schema migration. Returns configured BaseCheckpointSaver instance.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_server_config_py_Config_CLASS" TYPE="READS_DATA_FROM" />
+        <Link TARGET="src_server_app_factory_py_create_app_FUNC" TYPE="IS_CALLED_BY" />
+      </CrossLinks>
+    </build_checkpointer_FUNC>
+    <get_checkpointer_FUNC NAME="get_checkpointer" TYPE="IS_DEP_OF_MODULE">
+      <keywords>FastAPI_Depends; AppState; DependencyOverride</keywords>
+      <annotation>Returns app.state.checkpointer. Overridable in tests via dependency_overrides.</annotation>
+    </get_checkpointer_FUNC>
+  </src_server_checkpoint_factory_py>
+
+  <src_server_sweeper_py FILE="src/server/sweeper.py" TYPE="BACKGROUND_MODULE" VERSION="1.0.0">
+    <keywords>asyncio; TTL; IdleSweep; TouchBased; SWEEP_THRESHOLD_SECS; IMP5_Cleanup; active_sessions</keywords>
+    <annotation>Background asyncio coroutine that periodically scans the checkpointer for stale sessions and deletes them. Uses touch-based predicate: last_touched &lt; now - SWEEP_THRESHOLD_SECS (not last_update). Emits IMP:5 [Sweep][Cleanup] per deleted session and IMP:5 [Sweep][Summary] per scan cycle. Updates brainstorm_active_sessions gauge on deletion. Single-writer safe with the WAL checkpointer (LockRegistry deferred to BACKLOG).</annotation>
+    <Sweeper_CLASS NAME="Sweeper" TYPE="IS_CLASS_OF_MODULE">
+      <keywords>ConstructorInjected; Checkpointer; SessionTTL; SweepInterval</keywords>
+      <annotation>Constructor receives checkpointer, session_ttl_sec, sweep_interval_sec. run() is the long-running asyncio coroutine: sleep → scan → delete stale → log → repeat.</annotation>
+      <Sweeper_run_METHOD NAME="run" TYPE="IS_METHOD_OF_CLASS">
+        <keywords>InfiniteLoop; asyncio_sleep; ScanAndDelete; IMP5_Sweep</keywords>
+        <annotation>Infinite loop: await asyncio.sleep(interval) → list stale sessions → delete each → update active_sessions gauge → log IMP:5 Summary.</annotation>
+        <CrossLinks>
+          <Link TARGET="src_server_checkpoint_factory_py" TYPE="USES_CHECKPOINTER" />
+          <Link TARGET="src_server_metrics_py" TYPE="UPDATES_GAUGE" />
+        </CrossLinks>
+      </Sweeper_run_METHOD>
+    </Sweeper_CLASS>
+  </src_server_sweeper_py>
+
+  <src_server_metrics_py FILE="src/server/metrics.py" TYPE="OBSERVABILITY_MODULE" VERSION="1.0.0">
+    <keywords>prometheus_client; Counter; Histogram; Gauge; CollectorRegistry; brainstorm_prefix; 10MetricFamilies</keywords>
+    <annotation>Single-registry Prometheus metrics namespace. build_registry() creates a CollectorRegistry with all 10 brainstorm_* metric families: brainstorm_turns_total (Counter), brainstorm_turn_duration_seconds (Histogram), brainstorm_llm_roundtrip_seconds (Histogram), brainstorm_active_sessions (Gauge), brainstorm_done_total (Counter), brainstorm_token_verify_failures_total (Counter, label reason), brainstorm_idempotent_hits_total (Counter, label source), brainstorm_sweeper_runs_total (Counter), brainstorm_sweeper_deleted_total (Counter), brainstorm_readyz_checks_total (Counter). Exposed via /metrics endpoint on main port.</annotation>
+    <build_registry_FUNC NAME="build_registry" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>CollectorRegistry; 10Metrics; brainstorm_turns_total; brainstorm_active_sessions</keywords>
+      <annotation>Builds a CollectorRegistry used by the FastAPI app and scraped at /metrics. Also used in tests for metric-delta assertions.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_server_app_factory_py_create_app_FUNC" TYPE="IS_USED_BY" />
+        <Link TARGET="src_server_turn_api_py_handle_turn_FUNC" TYPE="IS_UPDATED_BY" />
+        <Link TARGET="src_server_sweeper_py_Sweeper_run_METHOD" TYPE="IS_UPDATED_BY" />
+      </CrossLinks>
+    </build_registry_FUNC>
+  </src_server_metrics_py>
+
+  <src_server_errors_py FILE="src/server/errors.py" TYPE="ERRORS_MODULE" VERSION="1.0.0">
+    <keywords>ConfigError; AuthError; LLMTimeoutError; HTTPException; CorrelationID</keywords>
+    <annotation>Domain exception types and their translation to HTTP responses. ConfigError for unsupported checkpointer kind. LLMTimeoutError for asyncio.TimeoutError in /turn handler. AuthError is defined in auth.py but its HTTPException translation lives here or in the require_service closure. All error responses include X-Correlation-ID header via CorrelationIDMiddleware.</annotation>
+  </src_server_errors_py>
+
+  <src_server_idempotency_py FILE="src/server/idempotency.py" TYPE="CACHE_MODULE" VERSION="1.0.0">
+    <keywords>TTLCache; cachetools; IdempotencyKey; asyncio_Lock; HeaderKey; InternalTupleKey; 600sTTL; PerPodCache</keywords>
+    <annotation>IdempotencyCache wrapping cachetools.TTLCache(maxsize=10000, ttl=600). Protected by asyncio.Lock for coroutine-safe lookup+insert. Key source: Idempotency-Key header (validated against ^[a-zA-Z0-9_\-]{8,128}$) if present; otherwise sha256(session_id + NUL + message + NUL + turn_n)[:32]. Cache is per-pod (Redis deferred to BACKLOG for multi-replica). Metric brainstorm_idempotent_hits_total{source="header"|"internal"} incremented on cache hit.</annotation>
+    <IdempotencyCache_CLASS NAME="IdempotencyCache" TYPE="IS_CLASS_OF_MODULE">
+      <keywords>TTLCache; asyncio_Lock; LookupInsert; CacheHit; MalformedKey</keywords>
+      <annotation>get(key) and set(key, value) are async, guarded by Lock. Malformed Idempotency-Key header → fall back to internal tuple key, log IMP:5 MalformedKey.</annotation>
+    </IdempotencyCache_CLASS>
+  </src_server_idempotency_py>
+
+  <src_server_middleware_py FILE="src/server/middleware.py" TYPE="MIDDLEWARE_MODULE" VERSION="1.0.0">
+    <keywords>CorrelationID; X-Correlation-ID; UUID4Fallback; RequestState; ResponseHeader; MalformedHeaderFingerprint; IMP5_Trace</keywords>
+    <annotation>Starlette middleware that reads X-Correlation-ID request header, validates against ^[a-zA-Z0-9_-]{8,64}$: match → use as-is; malformed → uuid4 + log IMP:5 MalformedCorrelationID with fingerprint; absent → uuid4 silently. Attaches to request.state.correlation_id. Copies to every response as X-Correlation-ID (even error responses).</annotation>
+  </src_server_middleware_py>
+
+  <src_server_turn_api_py FILE="src/server/turn_api.py" TYPE="HTTP_MODULE" VERSION="1.0.0">
+    <keywords>FastAPI; APIRouter; POST_turn; POST_done; GET_healthz; GET_readyz; GET_metrics; Lifespan; TurnResponse; DoneResponse; IMP7_TurnBoundary; IMP4_RequestIn</keywords>
+    <annotation>APIRouter with all 5 endpoints. /turn and /done require Depends(require_service("brainstorm")). /healthz, /readyz, /metrics are public. handle_turn: auth → body parse → idempotency check → session routing → stream_session/stream_resume_session → metrics → LDD IMP:7 Turn Start/End. handle_done: auth → delete checkpoint idempotently → 200. handle_readyz: checkpointer ping + LLM gateway HTTP probe (httpx, 2s timeout) → 200 or 503. handle_healthz: 200 unconditional.</annotation>
+    <handle_turn_FUNC NAME="handle_turn" TYPE="IS_HANDLER_OF_MODULE">
+      <keywords>TurnHappyPath; CheckpointLoad; StreamSession; asyncio_wait_for; LLMTimeout; IMP7_Turn; IMP9_BeliefState</keywords>
+      <annotation>Main turn handler. Reads Idempotency-Key header. Routes to start or resume session. Wraps LLM call in asyncio.wait_for(timeout=cfg.turn_timeout_sec). Returns TurnResponse(session_id, reply, state, metadata).</annotation>
+      <CrossLinks>
+        <Link TARGET="src_server_auth_py_require_service_FUNC" TYPE="DEPENDS_ON" />
+        <Link TARGET="src_server_checkpoint_factory_py_get_checkpointer_FUNC" TYPE="DEPENDS_ON" />
+        <Link TARGET="src_features_decision_maker_graph_py_stream_session_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_features_decision_maker_graph_py_stream_resume_session_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_server_idempotency_py_IdempotencyCache_CLASS" TYPE="USES_CACHE" />
+        <Link TARGET="src_server_metrics_py" TYPE="UPDATES_METRICS" />
+      </CrossLinks>
+    </handle_turn_FUNC>
+    <handle_done_FUNC NAME="handle_done" TYPE="IS_HANDLER_OF_MODULE">
+      <keywords>IdempotentDelete; CheckpointDelete; 200_Always; active_sessions_dec</keywords>
+      <annotation>Deletes checkpoint for session_id. Swallows NotFound — returns {"acknowledged": true} unconditionally. Decrements active_sessions gauge only if deletion found an existing session.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_server_auth_py_require_service_FUNC" TYPE="DEPENDS_ON" />
+        <Link TARGET="src_server_checkpoint_factory_py_get_checkpointer_FUNC" TYPE="DEPENDS_ON" />
+      </CrossLinks>
+    </handle_done_FUNC>
+    <handle_healthz_FUNC NAME="handle_healthz" TYPE="IS_HANDLER_OF_MODULE">
+      <keywords>LivenessProbe; 200_Unconditional; Public</keywords>
+      <annotation>Public liveness probe. Returns {"status":"ok"} unconditionally. No auth, no IO, no metric emission.</annotation>
+    </handle_healthz_FUNC>
+    <handle_readyz_FUNC NAME="handle_readyz" TYPE="IS_HANDLER_OF_MODULE">
+      <keywords>ReadinessProbe; CheckpointerPing; LLMGatewayProbe; httpx; 2sTimeout; 200_or_503; Public</keywords>
+      <annotation>Public readiness probe. Pings checkpointer (SELECT 1) and LLM gateway (httpx GET /healthz, 2s timeout). Returns 200 {status:ready} or 503 {status:not_ready, diag}.</annotation>
+    </handle_readyz_FUNC>
+  </src_server_turn_api_py>
+
+  <src_server_app_factory_py FILE="src/server/app_factory.py" TYPE="BOOTSTRAP_MODULE" VERSION="1.0.0">
+    <keywords>FastAPI; Lifespan; create_app; DependencyOverrides; CorrelationIDMiddleware; MetricsMount; Sweeper; UvicornFactory</keywords>
+    <annotation>create_app(cfg) factory: builds FastAPI instance with lifespan context manager that (startup) calls build_checkpointer, checkpointer.setup(), stores on app.state, builds llm_client, starts Sweeper asyncio task; (shutdown) cancels sweeper, calls checkpointer.close(). Mounts CorrelationIDMiddleware. Registers APIRouter from turn_api.py. Mounts /metrics on main port. Used as --factory entry point by uvicorn Dockerfile CMD.</annotation>
+    <create_app_FUNC NAME="create_app" TYPE="IS_FUNCTION_OF_MODULE">
+      <keywords>FactoryPattern; Lifespan; AppState; SweeperTask; MetricsMounting; UvicornFactory</keywords>
+      <annotation>Injectable for tests (TestClient(create_app(test_cfg))). Lifespan startup/shutdown LDD at IMP:7.</annotation>
+      <CrossLinks>
+        <Link TARGET="src_server_checkpoint_factory_py_build_checkpointer_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_server_sweeper_py_Sweeper_CLASS" TYPE="CONSTRUCTS" />
+        <Link TARGET="src_server_turn_api_py" TYPE="REGISTERS_ROUTER" />
+        <Link TARGET="src_server_metrics_py_build_registry_FUNC" TYPE="CALLS_FUNCTION" />
+        <Link TARGET="src_server_config_py_get_cfg_FUNC" TYPE="CALLS_FUNCTION" />
+      </CrossLinks>
+    </create_app_FUNC>
+  </src_server_app_factory_py>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: scripts/ — CLI helpers and L2 smoke (Slice E)             -->
+  <!-- ================================================================ -->
+
+  <scripts_mint_token_py FILE="scripts/mint_token.py" TYPE="DEVTOOL_MODULE" VERSION="2.0.0">
+    <keywords>DevOnly; TokenMint; CLI; HMAC_SHA256; GoWireCompat; DelegateToCanonical; argparse</keywords>
+    <annotation>Developer-only CLI helper. Mints v1 session tokens by delegating to src.server.auth.mint_session_token — does NOT reimplement HMAC. Arguments: --service-id (default brainstorm), --session-id (default uuid4), --ttl (required, seconds), --secret-env (default BRAINSTORM_HMAC_SECRET). Prints "Bearer v1.&lt;payload&gt;.&lt;sig&gt;" to stdout. Warnings to stderr. Secret fingerprint sha256:&lt;8hex&gt; only. 16-byte minimum secret check.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_server_auth_py_mint_session_token_FUNC" TYPE="CALLS_FUNCTION" />
+    </CrossLinks>
+  </scripts_mint_token_py>
+
+  <scripts_smoke_brainstorm_py FILE="scripts/smoke_brainstorm.py" TYPE="L2_SMOKE_MODULE" VERSION="2.0.0">
+    <keywords>L2Smoke; CISkippable; BRAINSTORM_SMOKE; 7Checks; StructuredBanner; httpx; MetricDelta; IdempotencyKeyCheck</keywords>
+    <annotation>L2 smoke test script. CI-skippable: exits 0 if BRAINSTORM_SMOKE != "1". 7 checks: (1) healthz 200 &lt;=2s, (2) readyz 200 checkpointer+llm, (3) metrics 200 text/plain + 10 families, (4) /turn no-auth 401 + X-Correlation-ID header, (5) forged token 401 + metric delta, (6) valid turn 200 reply + Idempotency-Key hit, (7) /done twice 200 idempotent. Uses httpx sync client. Inline _mint_bearer_inline (no src.server import). Prints [SMOKE][N/7][name] PASS/FAIL (rtt=Xms) banners. Exit 0 = all PASS, exit 1 = any FAIL.</annotation>
+  </scripts_smoke_brainstorm_py>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: tests/smoke/ — Mint roundtrip unit tests (Slice E)        -->
+  <!-- ================================================================ -->
+
+  <tests_smoke_test_mint_roundtrip_py FILE="tests/smoke/test_mint_roundtrip.py" TYPE="TEST_MODULE" VERSION="1.0.0">
+    <keywords>UnitTest; MintVerifyRoundtrip; TamperTest; ExpiryTest; WrongService; WrongSecret; I5_Invariant; AntiLoop; LDD_Telemetry; pytest_mark_unit</keywords>
+    <annotation>Pure unit tests for mint_session_token -> verify_session_token roundtrip. 7 tests: I5 shape invariant, happy-path roundtrip with IMP:9 log assertion, tampered-sig bad_signature, tampered-payload bad_signature, expired token, wrong_service, wrong_secret. No network. Anti-Loop conftest in tests/smoke/conftest.py. All @pytest.mark.unit.</annotation>
+    <CrossLinks>
+      <Link TARGET="src_server_auth_py_mint_session_token_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_server_auth_py_verify_session_token_FUNC" TYPE="TESTS" />
+      <Link TARGET="src_server_auth_py_TokenClaims_CLASS" TYPE="TESTS" />
+    </CrossLinks>
+  </tests_smoke_test_mint_roundtrip_py>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: Deployment (Slice D)                                       -->
+  <!-- ================================================================ -->
+
+  <k8s_deployment_section TYPE="DEPLOYMENT_ARTIFACTS">
+    <keywords>Kubernetes; kustomize; StatefulSet; Replicas1; Workers1; Hardlock; PVC; HMAC_Secret; ConfigMap; Service; Manifest</keywords>
+    <annotation>Kubernetes deployment artifacts in k8s/. StatefulSet with replicas=1 hardlocked (sqlite MVP — no multi-replica without Postgres). PVC at /data for SQLite checkpoint. Secrets injected via k8s Secret. Non-root uid 10001, readOnlyRootFilesystem, capabilities drop ALL. CMD: uvicorn src.server.app_factory:create_app --factory --host 0.0.0.0 --port 8000 --workers 1. Manifest file brainstorm.manifest.json declares MCP tools brainstorm__turn / brainstorm__done for gateway operator registration.</annotation>
+    <k8s_deployment_yaml FILE="k8s/deployment.yaml" TYPE="K8S_STATEFULSET">
+      <annotation>StatefulSet: replicas=1 hardlocked. BRAINSTORM_HMAC_SECRET and GATEWAY_LLM_API_KEY from Secret. GATEWAY_LLM_PROXY_URL and other config from ConfigMap. Liveness probe /healthz. Readiness probe /readyz. volumeMount /data for PVC.</annotation>
+    </k8s_deployment_yaml>
+    <k8s_brainstorm_manifest_json FILE="k8s/brainstorm.manifest.json" TYPE="MCP_MANIFEST">
+      <annotation>MCP manifest for gateway operator registration. Declares brainstorm__turn (POST /turn) and brainstorm__done (POST /done) tools with JSON schemas. Never auto-registered by the brainstorm service itself — constraint #12.</annotation>
+    </k8s_brainstorm_manifest_json>
+    <Dockerfile FILE="Dockerfile" TYPE="CONTAINER_BUILD">
+      <annotation>Multi-stage python:3.12-slim. Non-root USER 10001. CMD uvicorn factory --workers 1. HEALTHCHECK /healthz. .dockerignore excludes .venv, __pycache__, *.sqlite, *.log, *.pyc.</annotation>
+    </Dockerfile>
+  </k8s_deployment_section>
+
+  <!-- ================================================================ -->
+  <!-- LAYER: Documentation (Slice E)                                    -->
+  <!-- ================================================================ -->
+
+  <docs_section TYPE="DOCUMENTATION_ARTIFACTS">
+    <keywords>README; SECURITY; BACKLOG; MCP_API; Configuration; Deployment; ManifestRegistration; ThreatModel; HMAC_WireFormat; RaceAnalysis; DeferredItems</keywords>
+    <annotation>Slice E documentation layer. README.md extended with MCP HTTP API, Configuration table (14 env vars), Deployment (docker + kubectl), Manifest registration (curl POST), Security model (link to SECURITY.md). SECURITY.md: threat model (untrusted callers, replay, forgery), HMAC wire format, constant-time compare, logging policy, race analysis (sweeper 600s safe window), operational secrets (BRAINSTORM_HMAC_SECRET, GATEWAY_LLM_API_KEY, rotation procedure), container hardening (uid 10001, readOnlyRootFilesystem, caps drop ALL, replicas=1). BACKLOG.md: 7 deferred items (Postgres readiness, R4 re-mint, HMAC rotation, LockRegistry, hadolint, kustomize migration, Redis idempotency cache).</annotation>
+    <README_md FILE="README.md" TYPE="USER_DOCUMENTATION">
+      <annotation>Extended in v4.0.0 with: MCP HTTP API (5 endpoints), Configuration table, Deployment, Manifest registration, Security model sections appended after existing content.</annotation>
+    </README_md>
+    <SECURITY_md FILE="SECURITY.md" TYPE="SECURITY_DOCUMENTATION">
+      <annotation>NEW in Slice E. Threat model, HMAC wire format, constant-time compare rationale, logging policy, race analysis, operational secrets, container hardening, zero-knowledge domain invariant.</annotation>
+    </SECURITY_md>
+    <BACKLOG_md FILE="BACKLOG.md" TYPE="BACKLOG_DOCUMENTATION">
+      <annotation>NEW in Slice E. 7 deferred items with one-line rationale. Replaces TODO/FIXME in production code (constraint #9).</annotation>
+    </BACKLOG_md>
+  </docs_section>
 
 </KnowledgeGraph>

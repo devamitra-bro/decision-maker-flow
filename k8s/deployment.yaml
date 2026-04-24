@@ -1,0 +1,190 @@
+# FILE: k8s/deployment.yaml
+# VERSION: 1.0.0
+# START_MODULE_CONTRACT:
+# PURPOSE: Kubernetes StatefulSet for brainstorm-mcp service (sqlite MVP).
+#          Uses StatefulSet (not Deployment) because the sqlite checkpoint file is
+#          stateful — the pod needs a stable persistent volume across rescheduling.
+# SCOPE: replicas=1 hardlock per plan §9.5 (sqlite single-writer + --workers 1).
+#        Security hardening: non-root uid 10001, readOnlyRootFilesystem, drop ALL caps.
+#        Resource bounds, liveness + readiness probes, envFrom configmap + secrets.
+# INPUT: brainstorm-config ConfigMap, brainstorm-secrets Secret, data PVC (via volumeClaimTemplates).
+# OUTPUT: Running brainstorm-mcp pod at port 8000.
+# KEYWORDS: [DOMAIN(10): Kubernetes; TECH(9): StatefulSet; CONCEPT(9): SqliteSingleWriter;
+#            TECH(8): PodSecurity; CONCEPT(8): HardlockedReplicas]
+# LINKS_TO_SPECIFICATION: DevelopmentPlan_MCP.md §2.4 (Slice D), §9.5 (workers hardlock),
+#   §6 constraint #13 (no multi-replica with sqlite).
+# END_MODULE_CONTRACT
+#
+# INVARIANT: replicas=1 and --workers=1 are hardlocked together for sqlite MVP.
+# Postgres-backed deployment MAY scale replicas but MUST NOT exceed --workers=1
+# per pod due to LangGraph in-memory state semantics.
+#
+# START_RATIONALE:
+# Q: Why StatefulSet instead of Deployment?
+# A: StatefulSet provides stable network identity and volumeClaimTemplates that bind
+#    a PVC to each pod. For sqlite (single-writer), exactly one pod must own the
+#    database file. StatefulSet with replicas=1 and the INVARIANT comment enforces this.
+# Q: Why readOnlyRootFilesystem=true with an emptyDir for /tmp?
+# A: Python's tempfile module and uvicorn may write to /tmp. readOnlyRootFilesystem
+#    prevents any accidental writes to the container image layers (security hardening),
+#    but requires an emptyDir for /tmp. /data is a real PVC-backed volume.
+# Q: Why is HPA commented out?
+# A: sqlite single-writer semantics make horizontal scaling unsafe. The HPA stub is
+#    preserved to document the Postgres upgrade path — uncomment ONLY when switching
+#    to a Postgres checkpointer with proper session-state sharing.
+# END_RATIONALE
+#
+# START_CHANGE_SUMMARY:
+# LAST_CHANGE: [v1.0.0 - Initial creation as Slice D: StatefulSet with replicas=1 hardlock,
+#               security context, probes, HPA stub commented out.]
+# END_CHANGE_SUMMARY
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: brainstorm-mcp
+  namespace: default
+  labels:
+    app.kubernetes.io/name: brainstorm-mcp
+    app.kubernetes.io/component: sub-agent
+    app.kubernetes.io/part-of: crablink-mcp-gateway
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  serviceName: brainstorm-mcp
+  # INVARIANT: replicas=1 hardlocked — sqlite single-writer + LangGraph in-memory state.
+  # Do NOT increase replicas without migrating to Postgres checkpointer (see BACKLOG.md).
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: brainstorm-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: brainstorm-mcp
+        app.kubernetes.io/component: sub-agent
+        app.kubernetes.io/part-of: crablink-mcp-gateway
+    spec:
+      # Pod-level security: enforce non-root, seccomp RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+      - name: brainstorm
+        image: brainstorm-mcp:slice-d-test
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+
+        # Secrets injected individually from brainstorm-secrets Secret
+        env:
+        - name: BRAINSTORM_HMAC_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: brainstorm-secrets
+              key: hmac_secret
+        - name: GATEWAY_LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: brainstorm-secrets
+              key: llm_api_key
+
+        # Non-secret configuration from brainstorm-config ConfigMap
+        envFrom:
+        - configMapRef:
+            name: brainstorm-config
+
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        # emptyDir for /tmp — required with readOnlyRootFilesystem=true
+        # Python tempfile and uvicorn use /tmp; this satisfies that without
+        # making the container image writable.
+        - name: tmp
+          mountPath: /tmp
+
+        # Liveness probe: container is alive if /healthz returns 200.
+        # initialDelaySeconds=10 gives the uvicorn + checkpointer startup grace.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+        # Readiness probe: service is ready when checkpointer + LLM gateway are reachable.
+        # Uses /readyz which performs IO checks — hence slightly shorter period.
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+
+        # Container-level security hardening
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
+      volumes:
+      # emptyDir for /tmp (needed with readOnlyRootFilesystem=true)
+      - name: tmp
+        emptyDir: {}
+
+  # StatefulSet volumeClaimTemplates: creates a PVC per pod.
+  # In this MVP only 1 pod exists (replicas=1), so exactly 1 PVC is provisioned.
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 2Gi
+
+---
+# HPA explicitly disabled for MVP — uncomment ONLY when switching to Postgres
+# checkpointer (sqlite single-writer makes horizontal scaling unsafe).
+# Requires validation of graph-state sharing semantics before enabling.
+#
+# apiVersion: autoscaling/v2
+# kind: HorizontalPodAutoscaler
+# metadata:
+#   name: brainstorm-mcp
+#   namespace: default
+# spec:
+#   scaleTargetRef:
+#     apiVersion: apps/v1
+#     kind: StatefulSet
+#     name: brainstorm-mcp
+#   minReplicas: 1
+#   maxReplicas: 4
+#   metrics:
+#   - type: Resource
+#     resource:
+#       name: cpu
+#       target:
+#         type: Utilization
+#         averageUtilization: 70

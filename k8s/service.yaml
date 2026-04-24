@@ -1,0 +1,45 @@
+# FILE: k8s/service.yaml
+# VERSION: 1.0.0
+# START_MODULE_CONTRACT:
+# PURPOSE: Kubernetes ClusterIP Service for brainstorm-mcp, exposing port 8000 cluster-internally.
+#          Used as the DNS endpoint for intra-cluster calls from the MCP gateway.
+#          brainstorm.manifest.json references this service DNS name
+#          (brainstorm-mcp.default.svc.cluster.local:8000) for gateway operator registration.
+# SCOPE: ClusterIP service; port 8000 (HTTP); no external exposure (use Ingress/LB for that).
+# KEYWORDS: [DOMAIN(9): Kubernetes; TECH(9): ClusterIP; CONCEPT(8): ServiceDiscovery]
+# LINKS_TO_SPECIFICATION: DevelopmentPlan_MCP.md §2.4 (Slice D scope).
+# END_MODULE_CONTRACT
+#
+# START_RATIONALE:
+# Q: Why ClusterIP and not NodePort/LoadBalancer?
+# A: brainstorm is an internal sub-agent; it is only called by the MCP gateway
+#    (also a cluster service). Exposing it externally is a security violation.
+#    The MCP gateway is the public entry point; brainstorm stays cluster-internal.
+# Q: Why does the StatefulSet's serviceName reference this service?
+# A: StatefulSets require a "governing service" for stable network identity.
+#    This same Service (brainstorm-mcp) serves both purposes: governing service
+#    for StatefulSet stable hostname AND ClusterIP service for gateway routing.
+# END_RATIONALE
+#
+# START_CHANGE_SUMMARY:
+# LAST_CHANGE: [v1.0.0 - Initial creation as Slice D.]
+# END_CHANGE_SUMMARY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: brainstorm-mcp
+  namespace: default
+  labels:
+    app.kubernetes.io/name: brainstorm-mcp
+    app.kubernetes.io/component: sub-agent
+    app.kubernetes.io/part-of: crablink-mcp-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: brainstorm-mcp
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+    protocol: TCP
